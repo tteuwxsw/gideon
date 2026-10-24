@@ -3,6 +3,7 @@
 import os
 import subprocess
 import time
+from pathlib import Path
 import psutil
 from typing import Any
 
@@ -118,6 +119,37 @@ def encerrar_gideon() -> str:
     return "Encerrando todos os subsistemas da Gideon. Até logo, Henry."
 
 
+def atualizar_sistemas() -> dict[str, Any]:
+    """Puxa atualizações do Git e sincroniza as dependências da Gideon por voz."""
+    root_dir = Path(__file__).resolve().parent.parent.parent
+    try:
+        res_git = subprocess.run(["git", "pull"], capture_output=True, text=True, cwd=root_dir)
+        saida_git = (res_git.stdout + res_git.stderr).strip()
+
+        if "no tracking information" in saida_git.lower() or "no remote" in saida_git.lower():
+            return {
+                "atualizado": False,
+                "mensagem": "Nenhum repositório remoto configurado no Git ainda, Henry. Quando conectarmos ao seu GitHub, poderei baixar as novidades automaticamente.",
+            }
+
+        if "Already up to date" in saida_git or "Já está atualizado" in saida_git:
+            return {
+                "atualizado": False,
+                "mensagem": "Todos os subsistemas da Gideon já estão na versão mais recente, Henry.",
+            }
+
+        # Atualiza dependências locais com uv sync
+        subprocess.run(["uv", "sync"], capture_output=True, text=True, cwd=root_dir)
+
+        return {
+            "atualizado": True,
+            "detalhes": saida_git[:120],
+            "mensagem": "Novas atualizações foram baixadas e integradas aos meus sistemas com sucesso, Henry.",
+        }
+    except Exception as e:
+        return {"atualizado": False, "erro": str(e), "mensagem": f"Falha ao verificar atualizações: {str(e)}"}
+
+
 # ─── Registro das Ferramentas no Padrão do Portão de Risco ────
 
 FERRAMENTAS_SISTEMA = [
@@ -155,5 +187,12 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=encerrar_gideon,
         frase=lambda **kwargs: "encerrar e fechar a Gideon completamente",
+    ),
+    Ferramenta(
+        nome="atualizar_sistemas",
+        descricao="Verifica o repositório Git e atualiza o código e dependências da Gideon quando o Henry pedir para se atualizar.",
+        risco=Risco.VERDE,
+        executar=atualizar_sistemas,
+        frase=lambda **kwargs: "verificar e aplicar atualizações no repositório Git",
     ),
 ]
