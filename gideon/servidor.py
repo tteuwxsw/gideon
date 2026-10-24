@@ -468,6 +468,16 @@ def main():
     import sys
     global _loop_servidor
 
+    # Quando executado via pythonw.exe (sem janela preta), redireciona stdout/stderr para log
+    if sys.stdout is None or sys.stderr is None:
+        caminho_log = ROOT_DIR / "dados" / "gideon_background.log"
+        caminho_log.parent.mkdir(parents=True, exist_ok=True)
+        arquivo_log = open(caminho_log, "a", encoding="utf-8", buffering=1)
+        if sys.stdout is None:
+            sys.stdout = arquivo_log
+        if sys.stderr is None:
+            sys.stderr = arquivo_log
+
     # Garante saída compatível com qualquer terminal Windows (CP1252 / UTF-8)
     if hasattr(sys.stdout, "reconfigure"):
         try:
