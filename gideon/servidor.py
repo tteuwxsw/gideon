@@ -248,32 +248,45 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
     elif any(c in texto_lower for c in ["some da tela", "modo oculto", "oculta", "se esconde"]):
         await broadcast_ws({"tipo": "modo", "nome": "oculto"})
 
-    # 1. Verifica se é um comando explícito de memória ("lembra que...", "o que você sabe sobre mim?", etc.)
-    resposta_comando_memoria = memoria.processar_comando_explicito(texto_usuario)
-    if resposta_comando_memoria:
+    # 1. Verifica se é um comando explícito de memória ou uma intenção de execução real no Windows
+    resposta_comando_local = memoria.processar_comando_explicito(texto_usuario)
+    if not resposta_comando_local:
+        from gideon.voz.comandos import interpretar_intencao_natural, detectar_comando_sistema
+        orc_local = obter_orquestrador()
+        if (
+            orc_local._confirmacao_pendente
+            or detectar_comando_sistema(texto_usuario) is not None
+            or interpretar_intencao_natural(texto_usuario, orc_local.contexto_conversa) is not None
+        ):
+            resposta_comando_local = orc_local.processar_fala_local_rapida(
+                texto_usuario,
+                falar_feedback_imediato=False,
+            )
+
+    if resposta_comando_local:
         # Grava no histórico permanente
         memoria.gravar_mensagem("voce", texto_usuario)
-        memoria.gravar_mensagem("assistente", resposta_comando_memoria)
-        historico_conversa.append({"role": "assistant", "content": resposta_comando_memoria})
+        memoria.gravar_mensagem("assistente", resposta_comando_local)
+        historico_conversa.append({"role": "assistant", "content": resposta_comando_local})
 
         async def gerador_comando() -> AsyncGenerator[str, None]:
             # Emite evento de início de fala para o avatar
-            await broadcast_ws({"tipo": "fala_inicio", "texto": resposta_comando_memoria})
+            await broadcast_ws({"tipo": "fala_inicio", "texto": resposta_comando_local})
 
             # Extrai emoções do comando
             try:
                 from gideon.protocolo import extrair_emocoes_texto
-                for _, emo in extrair_emocoes_texto(resposta_comando_memoria):
+                for _, emo in extrair_emocoes_texto(resposta_comando_local):
                     await broadcast_ws({"tipo": "emocao", "nome": emo, "intensidade": 0.8})
             except Exception:
                 pass
 
             # Transmite o texto do comando
-            yield f"data: {json.dumps({'tipo': 'chunk', 'texto': resposta_comando_memoria}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'tipo': 'chunk', 'texto': resposta_comando_local}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.05)
 
-            # Transmite evento fim com 0 custo de API (executado localmente no banco)
-            yield f"data: {json.dumps({'tipo': 'fim', 'total_tokens': 0, 'custo_estimado': 0.0, 'modelo': 'memoria_local'}, ensure_ascii=False)}\n\n"
+            # Transmite evento fim com 0 custo de API (executado localmente)
+            yield f"data: {json.dumps({'tipo': 'fim', 'total_tokens': 0, 'custo_estimado': 0.0, 'modelo': 'executor_verificado'}, ensure_ascii=False)}\n\n"
             await broadcast_ws({"tipo": "fala_fim"})
 
         return StreamingResponse(
@@ -543,6 +556,22 @@ async def metricas_voz(_: bool = Depends(autenticar)):
     """Retorna as métricas reais de latência (p50, p95, TTFA) e consistência vocal."""
     from gideon.voz.metricas import metricas_voz_global
     return {"status": "ok", **metricas_voz_global.resumo_estatistico()}
+
+
+@app.get("/api/execucoes/historico")
+async def historico_execucoes(limite: int = 20, _: bool = Depends(autenticar)):
+    """Retorna os últimos registros estruturados de execução e verificação pós-condição."""
+    from gideon.executor import LOG_EXECUCOES
+    if not LOG_EXECUCOES.exists():
+        return {"status": "ok", "execucoes": []}
+    linhas = LOG_EXECUCOES.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+    itens = []
+    for ln in linhas[-limite:]:
+        try:
+            itens.append(json.loads(ln))
+        except Exception:
+            pass
+    return {"status": "ok", "execucoes": itens}
 
 
 # ─── Ponto de Entrada ─────────────────────────────────────────

@@ -133,10 +133,27 @@ class RegistroFerramentas:
                 })
                 return {"ok": False, "motivo": f"Ação requer confirmação do Henry: '{texto_acao}'."}
 
-        # Execução real
+        # Execução real com verificação obrigatória do retorno estruturado
         try:
             saida = f.executar(**args)
-            resultado = {"ok": True, "saida": saida}
+            if isinstance(saida, dict) and (
+                ("erro" in saida and saida["erro"])
+                or saida.get("sucesso") is False
+                or saida.get("verificado") is False
+            ):
+                motivo_erro = str(
+                    saida.get("erro")
+                    or saida.get("mensagem_humana")
+                    or saida.get("mensagem")
+                    or "Execução não verificada."
+                )
+                resultado = {"ok": False, "motivo": motivo_erro, "saida": saida}
+            elif isinstance(saida, str) and saida.lower().startswith(
+                ("falha", "erro", "não foi possível", "nao foi possivel", "acesso negado")
+            ):
+                resultado = {"ok": False, "motivo": saida, "saida": saida}
+            else:
+                resultado = {"ok": True, "saida": saida}
         except Exception as e:
             resultado = {"ok": False, "motivo": f"{type(e).__name__}: {str(e)}"}
 

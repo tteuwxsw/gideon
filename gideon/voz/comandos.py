@@ -1,4 +1,4 @@
-"""Interpretação de linguagem natural, detecção de fala direcionada e intenções da Gideon."""
+"""Interpretação de linguagem natural, planejamento multietapas e intenções verificadas da Gideon."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ def normalizar(texto: str) -> str:
 def detectar_comando_sistema(texto: str) -> str | None:
     """Detecta comandos críticos (Portão Vermelho) que exigem confirmação."""
     texto_norm = normalizar(texto)
-    # Garante que perguntas informativas ("qual é a versão?") não sejam confundidas com ordens
     if texto_norm.startswith(("qual ", "como ", "por que ", "quando ", "quem ", "o que ")):
         return None
     if re.search(r"\b(atualize|atualiza|atualizar|verifique)\b", texto_norm) and re.search(
@@ -28,8 +27,8 @@ def detectar_comando_sistema(texto: str) -> str | None:
     if any(
         frase in texto_norm
         for frase in (
-            "pode fechar",
-            "pode encerrar",
+            "pode fechar a gideon",
+            "pode encerrar a gideon",
             "encerre a gideon",
             "encerrar gideon",
             "desligue a gideon",
@@ -49,9 +48,12 @@ def resposta_confirmacao(texto: str) -> bool | None:
         "sim confirmo",
         "sim pode",
         "sim pode fazer",
+        "sim abre",
+        "sim pode abrir",
         "confirmo",
         "pode",
         "pode fazer",
+        "pode abrir",
         "pode continuar",
         "pode atualizar",
         "confirmado",
@@ -63,6 +65,8 @@ def resposta_confirmacao(texto: str) -> bool | None:
         "tudo bem",
         "isso mesmo",
         "manda ver",
+        "quero",
+        "quero sim",
     }
     negativas = {
         "nao",
@@ -79,7 +83,7 @@ def resposta_confirmacao(texto: str) -> bool | None:
         "esquece",
         "para",
     }
-    if texto_norm in afirmativas or texto_norm.startswith(("sim ", "confirmo ", "pode fazer")):
+    if texto_norm in afirmativas or texto_norm.startswith(("sim ", "confirmo ", "pode fazer", "pode abrir", "quero sim")):
         return True
     if texto_norm in negativas or texto_norm.startswith(("nao ", "cancela", "nao precisa", "deixa aberto")):
         return False
@@ -175,17 +179,14 @@ def avaliar_fala_direcionada(
     if not palavras:
         return 0.0
 
-    # 1. Comandos explícitos de interrupção, confirmação ou encerramento
     if eh_interrupcao_barge_in(texto) or eh_desistencia_rapida(texto) or eh_encerramento_conversa(texto):
         return 0.98
     if sessao_ativa and resposta_confirmacao(texto) is not None:
         return 0.95
 
-    # 2. Intenção clara de controle do PC / mídia / hardware
     if interpretar_intencao_natural(texto, contexto) is not None:
         return 0.92
 
-    # 3. Marcadores de fala direcionada à assistente ("me ajuda", "você consegue", "olha isso aqui", "meu pc")
     marcadores_diretos = (
         "me ajuda",
         "pode me ajudar",
@@ -196,6 +197,8 @@ def avaliar_fala_direcionada(
         "ve isso",
         "abre isso",
         "fecha isso",
+        "minimiza",
+        "maximiza",
         "ta agora",
         "agora fecha",
         "meu computador",
@@ -211,25 +214,73 @@ def avaliar_fala_direcionada(
     if any(m in t_limpo for m in marcadores_diretos):
         return 0.88
 
-    # 4. Se já está em sessão ativa de conversa e tem pelo menos 2 palavras
     if sessao_ativa and len(palavras) >= 2:
         return 0.82
 
-    # 5. Pergunta direta bem formada com >= 3 palavras
     if ("?" in texto or palavras[0] in {"como", "qual", "quanto", "quanta", "por", "onde", "quem", "quando"}) and len(palavras) >= 3:
         return 0.72
 
     return 0.20
 
 
+def interpretar_plano_multietapas(
+    texto: str,
+    contexto: dict[str, Any] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Decompõe comandos compostos com múltiplas etapas verificáveis.
+
+    Exemplos:
+    - "Abre o navegador e pesquisa sobre inteligência artificial"
+    - "Abre o Gerenciador de Tarefas e verifica o consumo de memória"
+    - "Abre o Bloco de Notas e digita reunião às 15 horas"
+    """
+    ctx = dict(contexto or {})
+    texto_limpo = texto.strip(" .,!?")
+    t_norm = normalizar(texto_limpo)
+
+    # Só tenta dividir se houver conectivo de sequência (" e depois ", " e em seguida ", " e ")
+    partes_brutas = re.split(
+        r"\s+(?:e depois|e em seguida|depois|em seguida|e tambem|e verifica|e veja|e olha|e pesquisa|e busca|e digita|e escreve|e minimiza|e maximiza|e fecha)\s+",
+        texto_limpo,
+        flags=re.IGNORECASE,
+    )
+
+    # Caso especial: preservamos o verbo quando o separador consumiu o verbo da 2ª etapa
+    padrao_composto = re.search(
+        r"^(.+?)\s+(?:e depois\s+|e em seguida\s+|,\s*depois\s+|e\s+)"
+        r"((?:pesquisa|pesquise|busca|busque|procura|procure|verifica|verifique|checa|veja|olha|digita|digite|escreve|escreva|minimiza|minimize|maximiza|maximize|fecha|feche|abre|abra)\b.+)$",
+        texto_limpo,
+        re.IGNORECASE,
+    )
+    if not padrao_composto:
+        return None
+
+    etapa1_txt = padrao_composto.group(1).strip()
+    etapa2_txt = padrao_composto.group(2).strip()
+
+    int1 = interpretar_intencao_natural(etapa1_txt, ctx, permitir_multietapas=False)
+    if not int1 or int1.get("acao") in {None, "nenhuma", "esclarecer", "perguntar_midia"}:
+        return None
+
+    if "novo_contexto" in int1:
+        ctx.update(int1["novo_contexto"])
+
+    int2 = interpretar_intencao_natural(etapa2_txt, ctx, permitir_multietapas=False)
+    if not int2 or int2.get("acao") in {None, "nenhuma", "esclarecer", "perguntar_midia"}:
+        return None
+
+    # Evita abrir navegador duas vezes se a etapa 1 é "abre o navegador" e a etapa 2 já é "pesquisar_navegador"
+    # Mas mantemos ambas no plano para que ambas sejam executadas/verificadas em sequência clara
+    return [int1, int2]
+
+
 def interpretar_intencao_natural(
     texto: str,
     contexto: dict[str, Any] | None = None,
+    *,
+    permitir_multietapas: bool = True,
 ) -> dict[str, Any] | None:
-    """Interpreta intenções naturais de controle do PC, mídia e telemetria sem exigir frases rígidas.
-
-    Separa claramente perguntas informativas de ordens de execução e trata comandos incompletos.
-    """
+    """Interpreta intenções naturais de controle real do Windows 10, arquivos, janelas, mídia e telemetria."""
     ctx = contexto or {}
     t = normalizar(texto)
     t_limpo = re.sub(r"[^a-z0-9 ]", " ", t)
@@ -243,10 +294,44 @@ def interpretar_intencao_natural(
         return {
             "acao": "cancelar_fluxo",
             "resposta_direta": "[EMOCAO:neutra] Tudo bem.",
-            "novo_contexto": {"aguardando_escolha_midia": False},
+            "novo_contexto": {"aguardando_escolha_midia": False, "aguardando_pesquisa_web": False},
         }
 
-    # 1. Contexto ativo: se a Gideon acabou de perguntar "O que gostaria de ouvir?"
+    # 0.5. Verifica se é um plano multietapas ("abre o navegador e pesquisa sobre IA")
+    if permitir_multietapas:
+        plano = interpretar_plano_multietapas(texto, ctx)
+        if plano and len(plano) >= 2:
+            novo_ctx: dict[str, Any] = {}
+            for p in plano:
+                novo_ctx.update(p.get("novo_contexto") or {})
+            return {
+                "acao": "plano_multietapas",
+                "etapas": plano,
+                "novo_contexto": novo_ctx,
+            }
+
+    # 1. Contexto ativo: se a Gideon acabou de perguntar "O que você gostaria de pesquisar?"
+    if ctx.get("aguardando_pesquisa_web"):
+        if resposta_confirmacao(texto) is False:
+            return {
+                "acao": "nenhuma",
+                "resposta_direta": "[EMOCAO:neutra] Tudo bem.",
+                "novo_contexto": {"aguardando_pesquisa_web": False},
+            }
+        termo_busca = extrair_termo_pesquisa(texto)
+        motor = ctx.get("motor_pesquisa", "google")
+        if termo_busca:
+            return {
+                "acao": "pesquisar_navegador",
+                "parametros": {"consulta": termo_busca, "motor": motor},
+                "novo_contexto": {
+                    "aguardando_pesquisa_web": False,
+                    "ultimo_topico": "navegador",
+                    "ultimo_app": "chrome",
+                },
+            }
+
+    # 1.5. Contexto ativo: se a Gideon acabou de perguntar "O que gostaria de ouvir?"
     if ctx.get("aguardando_escolha_midia"):
         if resposta_confirmacao(texto) is False:
             return {
@@ -267,7 +352,23 @@ def interpretar_intencao_natural(
                 },
             }
 
-    # 2. Pedido genérico para colocar música ("agora coloca uma musica", "bota uma musica")
+    # 2. Pedido conversacional para pesquisar algo sem dizer o termo ainda ("Quero pesquisar uma coisa no Google")
+    if re.search(
+        r"\b(quero pesquisar uma coisa|quero fazer uma pesquisa|quero buscar uma coisa|pesquisa uma coisa pra mim)\b",
+        t_limpo,
+    ):
+        motor = "youtube" if "youtube" in t_limpo else "google"
+        return {
+            "acao": "perguntar_pesquisa",
+            "resposta_direta": f"[EMOCAO:amigavel] Claro. O que você gostaria de pesquisar no {motor.capitalize()}?",
+            "novo_contexto": {
+                "aguardando_pesquisa_web": True,
+                "motor_pesquisa": motor,
+                "ultimo_topico": "navegador",
+            },
+        }
+
+    # 2.5. Pedido genérico para colocar música ("agora coloca uma musica", "bota uma musica")
     if re.search(r"\b(coloca|coloque|bota|toca|tocar|ouvir|reproduz|play)\b", t_limpo) and re.search(
         r"\b(uma musica|alguma musica|musica|um som)\b$", t_limpo
     ):
@@ -282,9 +383,181 @@ def interpretar_intencao_natural(
             },
         }
 
-    # 3. Pedido direto para tocar artista/música específica ("coloca alguma coisa do Chase Atlantic")
+    # 3. Gerenciamento de janelas ("minimiza ele", "maximiza a janela", "restaura o chrome", "alterna para o vscode")
+    match_janela = re.search(
+        r"\b(minimiza|minimize|maximiza|maximize|restaura|restaure|alterna para|alterne para|muda para|foca no|foca na|traz para frente)\b"
+        r"(?:\s+(?:o|a|os|as|janela d[eo]|programa|aplicativo))?\s*(.*)$",
+        t_limpo,
+    )
+    if match_janela:
+        verbo_jan = match_janela.group(1).strip()
+        alvo_jan = match_janela.group(2).strip()
+        for sufixo in ("pra mim", "por favor", "agora"):
+            if alvo_jan.endswith(sufixo):
+                alvo_jan = alvo_jan[: -len(sufixo)].strip()
+
+        if verbo_jan.startswith("minimiz"):
+            acao_jan = "minimizar"
+        elif verbo_jan.startswith("maximiz"):
+            acao_jan = "maximizar"
+        elif verbo_jan.startswith("restaur"):
+            acao_jan = "restaurar"
+        else:
+            acao_jan = "focar"
+
+        if alvo_jan in {"", "ele", "ela", "isso", "janela", "programa", "aplicativo"}:
+            alvo_resolvido = ctx.get("ultimo_app", "")
+        else:
+            alvo_resolvido = alvo_jan
+
+        return {
+            "acao": "gerenciar_janela",
+            "parametros": {"acao": acao_jan, "alvo": alvo_resolvido},
+            "novo_contexto": {"ultimo_topico": "janelas"},
+        }
+
+    # 4. Fechar aplicativo ("fecha o bloco de notas", "pode fechar a calculadora", "fecha ele")
+    match_fechar = re.search(
+        r"\b(?:fecha|feche|fechar|encerra|encerre|encerrar)\s+(?:o|a|os|as|programa|aplicativo|janela d[eo])?\s*(.+)$",
+        t_limpo,
+    )
+    if match_fechar and "gideon" not in t_limpo and "conversa" not in t_limpo:
+        alvo_fechar = match_fechar.group(1).strip()
+        for sufixo in ("pra mim", "por favor", "agora"):
+            if alvo_fechar.endswith(sufixo):
+                alvo_fechar = alvo_fechar[: -len(sufixo)].strip()
+        if alvo_fechar in {"ele", "ela", "isso", "programa", "aplicativo", "janela"}:
+            alvo_fechar = ctx.get("ultimo_app", "")
+        if alvo_fechar:
+            return {
+                "acao": "fechar_programa",
+                "parametros": {"nome": alvo_fechar},
+                "novo_contexto": {"ultimo_topico": "aplicativos"},
+            }
+
+    # 5. Abrir pastas do Windows ("abre a pasta downloads", "abre meus documentos", "abre a área de trabalho")
+    match_pasta = re.search(
+        r"\b(?:abre|abra|abrir|mostra|acessa)\s+(?:a\s+pasta|o\s+diretorio|meus|minhas|a\s+area\s+de\s+trabalho)\s*(.*)$",
+        t_limpo,
+    )
+    if match_pasta:
+        nome_pasta = match_pasta.group(1).strip()
+        for sufixo in ("pra mim", "por favor", "no computador"):
+            if nome_pasta.endswith(sufixo):
+                nome_pasta = nome_pasta[: -len(sufixo)].strip()
+        if not nome_pasta and "area de trabalho" in t_limpo:
+            nome_pasta = "desktop"
+        elif not nome_pasta and "documentos" in t_limpo:
+            nome_pasta = "documentos"
+        if nome_pasta in {"", "downloads", "download", "documentos", "desktop", "area de trabalho", "imagens", "fotos", "musicas", "videos", "projeto"}:
+            return {
+                "acao": "abrir_pasta",
+                "parametros": {"pasta": nome_pasta or "downloads"},
+                "novo_contexto": {"ultimo_topico": "arquivos", "ultima_pasta": nome_pasta or "downloads"},
+            }
+
+    # 6. Listar ou pesquisar arquivos ("lista os arquivos de downloads", "procura o arquivo relatorio", "pesquisa arquivos com nome teste")
+    if re.search(r"\b(lista os arquivos|listar arquivos|quais arquivos tem|o que tem na pasta)\b", t_limpo):
+        pasta_alvo = "downloads"
+        for p_nome in ("documentos", "desktop", "area de trabalho", "projeto", "downloads"):
+            if p_nome in t_limpo:
+                pasta_alvo = p_nome
+                break
+        return {
+            "acao": "listar_arquivos",
+            "parametros": {"pasta": pasta_alvo},
+            "novo_contexto": {"ultimo_topico": "arquivos", "ultima_pasta": pasta_alvo},
+        }
+
+    match_busca_arq = re.search(
+        r"\b(?:procura|procure|pesquisa|pesquise|encontra|encontre|acha|ache)\s+(?:o\s+arquivo|arquivos?\s+com\s+nome|arquivos?\s+chamado|pelo\s+arquivo)\s+(.+)$",
+        texto.strip(" .,!?"),
+        re.IGNORECASE,
+    )
+    if match_busca_arq:
+        termo_arq = match_busca_arq.group(1).strip(" \"'")
+        for sufixo in (" pra mim", " por favor", " no computador", " no pc"):
+            if termo_arq.lower().endswith(sufixo):
+                termo_arq = termo_arq[: -len(sufixo)].strip(" \"'")
+        return {
+            "acao": "pesquisar_arquivos",
+            "parametros": {"termo": termo_arq},
+            "novo_contexto": {"ultimo_topico": "arquivos"},
+        }
+
+    # 7. Criar arquivo ("cria um arquivo chamado notas.txt com o texto comprar café")
+    match_criar_arq = re.search(
+        r"\b(?:cria|crie|criar)\s+(?:um\s+)?arquivo\s+(?:chamado\s+|com\s+nome\s+)?([^\s]+)(?:\s+com\s+(?:o\s+texto|o\s+conteudo)\s+(.+))?$",
+        texto.strip(" .,!?"),
+        re.IGNORECASE,
+    )
+    if match_criar_arq:
+        nome_arq = match_criar_arq.group(1).strip(" \"'")
+        conteudo_arq = (match_criar_arq.group(2) or "").strip()
+        return {
+            "acao": "criar_arquivo",
+            "parametros": {"caminho": nome_arq, "conteudo": conteudo_arq},
+            "novo_contexto": {"ultimo_topico": "arquivos"},
+        }
+
+    # 8. Digitar texto ou executar atalho de teclado
+    match_digitar = re.search(
+        r"\b(?:digita|digite|escreve|escreva)\s+(?:o\s+texto\s+)?(.+?)(?:\s+no\s+(bloco de notas|notepad|chrome|navegador|vscode))?$",
+        texto.strip(" .,!?"),
+        re.IGNORECASE,
+    )
+    if match_digitar and not re.search(r"\b(arquivo|poema|codigo|historia|resumo|email)\b", t_limpo[:25]):
+        texto_dig = match_digitar.group(1).strip(" \"'")
+        janela_dig = (match_digitar.group(2) or ctx.get("ultimo_app") or "").strip()
+        return {
+            "acao": "digitar_texto",
+            "parametros": {"texto": texto_dig, "janela_alvo": janela_dig},
+            "novo_contexto": {"ultimo_topico": "automacao_ui"},
+        }
+
+    match_atalho = re.search(
+        r"\b(?:pressiona|pressione|aperta|aperte|executa o atalho|atalho)\s+((?:ctrl|control|alt|shift|win)\s*[\+\-\s]\s*[a-z0-9]+|enter|esc|f[0-9]{1,2}|alt\s*tab)\b",
+        t_limpo,
+    )
+    if match_atalho:
+        atalho_bruto = re.sub(r"\s+", "+", match_atalho.group(1).strip())
+        return {
+            "acao": "executar_atalho_teclado",
+            "parametros": {"atalho": atalho_bruto},
+            "novo_contexto": {"ultimo_topico": "automacao_ui"},
+        }
+
+    # 9. Pesquisa explícita no navegador ("pesquisa sobre inteligência artificial", "pesquisa X no Google")
+    match_pesquisa_web = re.search(
+        r"\b(?:pesquisa|pesquise|pesquisar|busca|busque|buscar|procura|procure)\s+"
+        r"(?:sobre\s+|por\s+|no\s+google\s+sobre\s+|no\s+navegador\s+sobre\s+)?"
+        r"(.+?)(?:\s+no\s+(google|youtube|navegador|internet))?$",
+        texto.strip(" .,!?"),
+        re.IGNORECASE,
+    )
+    if match_pesquisa_web:
+        termo_web = match_pesquisa_web.group(1).strip()
+        motor_explicito = (match_pesquisa_web.group(2) or "").lower()
+        for sufixo in (" pra mim", " por favor"):
+            if termo_web.lower().endswith(sufixo):
+                termo_web = termo_web[: -len(sufixo)].strip()
+        if (
+            motor_explicito in {"google", "youtube", "navegador", "internet"}
+            or re.search(r"\b(pesquisa sobre|pesquise sobre|busca sobre|pesquisa no google)\b", t_limpo)
+        ):
+            motor_final = "youtube" if motor_explicito == "youtube" else "google"
+            return {
+                "acao": "pesquisar_navegador",
+                "parametros": {"consulta": termo_web, "motor": motor_final},
+                "novo_contexto": {
+                    "ultimo_topico": "navegador",
+                    "ultimo_app": "chrome",
+                },
+            }
+
+    # 10. Pedido direto para tocar artista/música específica ("coloca alguma coisa do Chase Atlantic")
     match_midia = re.search(
-        r"\b(?:coloca|coloque|bota|toca|tocar|ouvir|reproduz|pesquisa|busca)\s+"
+        r"\b(?:coloca|coloque|bota|toca|tocar|ouvir|reproduz)\s+"
         r"(?:alguma coisa d[eo]s?\s+|uma musica d[eo]s?\s+|musica d[eo]s?\s+|um som d[eo]s?\s+|algo d[eo]s?\s+)?"
         r"(.+?)(?:\s+no\s+(spotify|youtube|google))?$",
         texto.strip(" .,!?"),
@@ -298,7 +571,7 @@ def interpretar_intencao_natural(
         if (
             plataforma_explicita in {"spotify", "youtube", "google"}
             or re.search(r"\b(alguma coisa d|musica d|som d|toca |bota |coloca )\b", t_limpo)
-        ) and termo_norm not in palavras_sistema and not termo_norm.startswith(("uma musica", "musica")):
+        ) and termo_norm not in palavras_sistema and not termo_norm.startswith(("uma musica", "musica", "no ")):
             plat = plataforma_explicita or ctx.get("plataforma_midia") or "spotify"
             return {
                 "acao": "tocar_ou_pesquisar_midia",
@@ -310,7 +583,7 @@ def interpretar_intencao_natural(
                 },
             }
 
-    # 4. Controles de mídia e volume ("pausa a musica", "proxima musica", "aumenta o volume")
+    # 11. Controles de mídia e volume ("pausa a musica", "proxima musica", "aumenta o volume")
     if re.search(r"\b(pausa|pausar|para a musica)\b", t_limpo):
         return {"acao": "controlar_midia", "parametros": {"acao": "pausar"}, "novo_contexto": {"ultimo_topico": "midia"}}
     if re.search(r"\b(proxima musica|proxima faixa|pula a musica|passa a musica)\b", t_limpo):
@@ -321,8 +594,10 @@ def interpretar_intencao_natural(
         return {"acao": "controlar_midia", "parametros": {"acao": "aumentar_volume"}, "novo_contexto": {}}
     if re.search(r"\b(abaixa o volume|diminui o volume|diminuir volume|mais baixo)\b", t_limpo):
         return {"acao": "controlar_midia", "parametros": {"acao": "diminuir_volume"}, "novo_contexto": {}}
+    if re.search(r"\b(silencia|deixa no mudo|tirar o som|mutar)\b", t_limpo):
+        return {"acao": "controlar_midia", "parametros": {"acao": "mudo"}, "novo_contexto": {}}
 
-    # 5. Comandos incompletos ou dêiticos sem alvo ("Abre isso aqui pra mim", "Ei, olha isso aqui")
+    # 12. Comandos incompletos ou dêiticos sem alvo ("Abre isso aqui pra mim", "Ei, olha isso aqui")
     if re.search(r"\b(abre isso|abra isso|abrir isso|abre aqui)\b", t_limpo):
         ultimo_app = ctx.get("ultimo_app")
         if ultimo_app:
@@ -337,8 +612,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {},
         }
 
-    # 6. Abertura natural de navegador / internet / aplicativos sem comandos rígidos
-    # Distingue perguntas conceituais ("o que é o Chrome?") de pedidos de ação ("consegue abrir o Google?")
+    # 13. Abertura natural de navegador / internet / aplicativos sem comandos rígidos
     eh_pergunta_conceitual = t_limpo.startswith(("o que e ", "quem criou ", "para que serve ", "como funciona "))
     verbos_abrir = (
         r"\b(abre|abra|abrir|abro|abri|inicia|iniciar|executa|roda|entrar|entra|entre|"
@@ -360,6 +634,8 @@ def interpretar_intencao_natural(
             (r"\b(gerenciador de tarefas|taskmgr)\b", "gerenciador de tarefas"),
             (r"\b(configuracoes|ajustes do windows)\b", "configuracoes"),
             (r"\b(terminal|powershell|prompt)\b", "terminal"),
+            (r"\b(edge|microsoft edge)\b", "edge"),
+            (r"\b(paint|mspaint)\b", "paint"),
         ]
         for padrao_alvo, nome_app in mapa_alvos:
             if re.search(padrao_alvo, t_limpo):
@@ -373,7 +649,23 @@ def interpretar_intencao_natural(
                     },
                 }
 
-    # 7. Pergunta contextual sobre normalidade do hardware ("Isso é normal?", "Está alto?", "Está bom?")
+        # Se o usuário pediu explicitamente para abrir algum outro programa ("abre o photoshop", "abre o blender")
+        # Roteamos para abrir_programa para que o ExecutorConfiavel verifique a existência real e NUNCA minta!
+        match_app_generico = re.search(
+            r"\b(?:abre|abra|abrir|inicia|iniciar|executa)\s+(?:o\s+programa\s+|o\s+aplicativo\s+|o\s+app\s+|o\s+|a\s+)?([a-z0-9_.\- ]+?)(?:\s+pra mim|\s+por favor|\s+agora)?$",
+            t_limpo,
+        )
+        if match_app_generico:
+            cand = match_app_generico.group(1).strip()
+            palavras_ignorar = {"conversa", "modo", "sessao", "olho", "mente", "explicacao", "jogo"}
+            if cand and cand not in palavras_ignorar and len(cand.split()) <= 3:
+                return {
+                    "acao": "abrir_programa",
+                    "parametros": {"nome": cand},
+                    "novo_contexto": {"ultimo_app": cand, "ultimo_topico": "aplicativos"},
+                }
+
+    # 14. Pergunta contextual sobre normalidade do hardware ("Isso é normal?", "Está alto?", "Está bom?")
     if ctx.get("ultimo_topico") == "hardware_pc" and re.search(
         r"\b(isso e normal|ta normal|esta normal|e normal|ta bom|esta alto|ta alto|preocupante)\b",
         t_limpo,
@@ -391,7 +683,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc"},
         }
 
-    # 8. Diagnóstico natural de lentidão ("Por que meu computador tá travando?", "Você consegue ver o que está acontecendo?")
+    # 15. Diagnóstico natural de lentidão
     if re.search(
         r"\b(por que meu computador ta travando|computador travando|pc lento|computador lento|o que esta acontecendo no pc|ve o que esta acontecendo)\b",
         t_limpo,
@@ -403,7 +695,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "geral"},
         }
 
-    # 9. Telemetria contextual do PC (CPU, RAM, GPU / Placa de Vídeo, Disco)
+    # 16. Telemetria contextual do PC (CPU, RAM, GPU / Placa de Vídeo, Disco)
     if re.search(r"\b(placa de video|gpu|radeon|rx 580|vram|memoria de video)\b", t_limpo):
         return {
             "acao": "obter_status_gpu",
@@ -412,9 +704,10 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "gpu"},
         }
 
-    if re.search(r"\b(memoria ram|uso de ram|quanto de ram|quanta ram|memoria estou usando|ram meu computador)\b", t_limpo) or (
-        ctx.get("ultimo_topico") == "hardware_pc" and re.search(r"^(e a |e de )?(memoria|ram)\b", t_limpo)
-    ):
+    if re.search(
+        r"\b(memoria ram|uso de ram|consumo de memoria|consumo de ram|quanto de ram|quanta ram|memoria estou usando|ram meu computador|verifica a memoria|verificar a memoria)\b",
+        t_limpo,
+    ) or (ctx.get("ultimo_topico") == "hardware_pc" and re.search(r"^(e a |e de )?(memoria|ram)\b", t_limpo)):
         return {
             "acao": "obter_status_pc",
             "parametros": {},
@@ -422,7 +715,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "ram"},
         }
 
-    if re.search(r"\b(uso de cpu|processador|como esta a cpu)\b", t_limpo) or (
+    if re.search(r"\b(uso de cpu|consumo de cpu|processador|como esta a cpu)\b", t_limpo) or (
         ctx.get("ultimo_topico") == "hardware_pc" and re.search(r"^(e o |e a )?(processador|cpu)\b", t_limpo)
     ):
         return {
@@ -453,7 +746,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "geral"},
         }
 
-    # 10. Programas abertos em execução
+    # 17. Programas abertos em execução
     if re.search(
         r"\b(programas\s+(?:estao\s+|que\s+estao\s+)?abertos|o\s+que\s+(?:esta|ta)\s+aberto|aplicativos\s+(?:estao\s+)?abertos|rodando\s+no\s+pc)\b",
         t_limpo,
@@ -464,7 +757,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "aplicativos"},
         }
 
-    # 11. Bloquear tela
+    # 18. Bloquear tela
     if re.search(r"\b(bloqueia a tela|bloquear a tela|bloqueia o pc|tranca a tela|bloquear computador)\b", t_limpo):
         return {
             "acao": "bloquear_estacao",
@@ -472,7 +765,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "seguranca"},
         }
 
-    # 12. Modos visuais do holograma
+    # 19. Modos visuais do holograma
     if re.search(r"\b(modo foco|focar|centro da tela)\b", t_limpo):
         return {"acao": "modo_avatar", "parametros": {"modo": "foco"}, "novo_contexto": {}}
     if re.search(r"\b(modo compacto|ir para o canto|ficar pequena)\b", t_limpo):
@@ -483,6 +776,22 @@ def interpretar_intencao_natural(
         return {"acao": "modo_avatar", "parametros": {"modo": "oculto"}, "novo_contexto": {}}
 
     return None
+
+
+def extrair_termo_pesquisa(texto: str) -> str:
+    """Extrai o termo de busca quando o usuário responde ao prompt de pesquisa."""
+    limpo = texto.strip(" .,!?")
+    padrao = (
+        r"^(?:por favor\s+|entao\s+|agora\s+)?"
+        r"(?:pesquisa|pesquise|busca|busque|procura|procure|quero saber)?\s*"
+        r"(?:sobre\s+|por\s+|a\s+respeito\s+de\s+)?"
+        r"(.+?)(?:\s+no\s+(?:google|youtube))?"
+        r"(?:\s+pra mim|\s+por favor)?$"
+    )
+    m = re.search(padrao, limpo, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(" .,!?")
+    return limpo
 
 
 def extrair_termo_midia(texto: str) -> str:

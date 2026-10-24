@@ -1,4 +1,4 @@
-"""Orquestrador de baixa latência da Gideon: Streaming LLM->TTS, 3 Modos, Barge-In e Telemetria."""
+"""Orquestrador de baixa latência e execução real verificada da Gideon."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Callable, Any, Generator
 import numpy as np
 
 from gideon.cerebro import Cerebro
+from gideon.executor import EstadoExecucao, ExecutorConfiavel, ResultadoExecucao
 from gideon.memoria import Memoria
 from gideon.protocolo import limpar_emocoes_texto, extrair_emocoes_texto
 from gideon.tools import obter_catalogo_ferramentas
@@ -39,7 +40,7 @@ class ModoEscuta(str, Enum):
 
 
 class OrquestradorVoz:
-    """Controla o pipeline de baixa latência: Microfone -> VAD -> STT -> NLU/LLM Stream -> TTS -> Áudio."""
+    """Controla o pipeline: Microfone -> VAD -> STT -> NLU/Executor Verificado/LLM Stream -> TTS -> Áudio."""
 
     def __init__(
         self,
@@ -63,6 +64,9 @@ class OrquestradorVoz:
         self._ultimo_contato = 0.0
 
         self._catalogo = obter_catalogo_ferramentas()
+        self._executor = ExecutorConfiavel(self._catalogo)
+        self.ultima_execucao: ResultadoExecucao | None = None
+
         self._confirmacao_pendente: str | None = None
         self._parametros_pendentes: dict[str, Any] = {}
         self._confirmacao_expira_em = 0.0
@@ -76,10 +80,18 @@ class OrquestradorVoz:
         self.ultimo_nlu_ms: float = 0.0
         self.ultimo_llm_ttft_ms: float = 0.0
 
+    def _obter_executor(self) -> ExecutorConfiavel:
+        exec_inst = getattr(self, "_executor", None)
+        if exec_inst is None:
+            exec_inst = ExecutorConfiavel(self._catalogo)
+            self._executor = exec_inst
+        return exec_inst
+
     def obter_configuracao(self) -> dict[str, Any]:
         """Retorna estado, configurações e resumo de métricas p50/p95."""
         agora = time.time()
         sessao_ativa = self._em_conversa_ativa and (agora - self._ultimo_contato) < self.duracao_sessao
+        ultima_exec = getattr(self, "ultima_execucao", None)
         return {
             "ativa": self.ativo,
             "voz_fixa_id": self.sintetizador.voz_id,
@@ -90,6 +102,7 @@ class OrquestradorVoz:
             "barge_in_ativo": self.sintetizador.barge_in_ativo,
             "falando": self.sintetizador.falando,
             "contexto_atual": self.contexto_conversa.get("ultimo_topico", "geral"),
+            "ultima_execucao": ultima_exec.para_dict() if ultima_exec else None,
             "metricas_latencia": metricas_voz_global.resumo_estatistico(),
         }
 
@@ -128,7 +141,7 @@ class OrquestradorVoz:
         return self.sintetizador.interromper()
 
     def _evento_interno(self, evento: dict) -> None:
-        if self.callback_ws:
+        if getattr(self, "callback_ws", None):
             try:
                 self.callback_ws(evento)
             except Exception:
@@ -166,8 +179,58 @@ class OrquestradorVoz:
             self._evento_interno({"tipo": "emocao", "nome": emo, "intensidade": 0.8})
         return limpar_emocoes_texto(texto)
 
-    def processar_fala_local_rapida(self, comando: str) -> str | None:
-        """Tenta resolver a solicitação localmente em < 5ms sem precisar chamar o LLM."""
+    def _executar_intencao_verificada(
+        self,
+        intencao: dict[str, Any],
+        *,
+        falar_feedback_imediato: bool = False,
+    ) -> str:
+        """Executa uma única intenção pelo ExecutorConfiavel e retorna resposta humana baseada no resultado real."""
+        acao = intencao.get("acao", "")
+        params = intencao.get("parametros", {})
+
+        if acao == "modo_avatar":
+            modo_av = params.get("modo", "conversa")
+            self._evento_interno({"tipo": "modo", "nome": modo_av})
+            return "[EMOCAO:amigavel] Feito."
+
+        # Se for uma ação que abre janela/processo e estivermos no loop de voz real, dá feedback curto antes de verificar
+        if falar_feedback_imediato and acao in {"abrir_programa", "pesquisar_navegador", "abrir_pasta"}:
+            self._evento_interno({"tipo": "pensando", "ativo": False})
+            self.sintetizador.falar("Abrindo.")
+
+        executor = self._obter_executor()
+        res = executor.executar(acao, params, auto_amarelo=True)
+        self.ultima_execucao = res
+
+        # Se a execução falhou ou não foi verificada, NUNCA confirma sucesso!
+        if res.estado != EstadoExecucao.SUCCESS or not res.verificado:
+            if res.sugestao_recuperacao and res.alternativa_recuperacao:
+                self._confirmacao_pendente = res.alternativa_recuperacao.get("acao")
+                self._parametros_pendentes = dict(res.alternativa_recuperacao.get("parametros") or {})
+                self._confirmacao_expira_em = time.time() + 45.0
+                return f"[EMOCAO:curiosidade] {res.mensagem_humana}"
+            return f"[EMOCAO:preocupacao] {res.mensagem_humana}"
+
+        # Execução verificada com sucesso! Formata a resposta de acordo com a ferramenta
+        saida = res.resultado
+        if acao in ("obter_status_pc", "obter_status_gpu") and isinstance(saida, dict):
+            foco = intencao.get("foco_resposta", "geral")
+            return formatar_resposta_telemetria(saida, foco=foco)
+
+        if acao == "listar_programas_usuario" and isinstance(saida, list):
+            principais = ", ".join(saida[:8]) if saida else "nenhum aplicativo principal"
+            return f"[EMOCAO:concentracao] Estão abertos: {principais}."
+
+        return f"[EMOCAO:satisfacao] {res.mensagem_humana}"
+
+    def processar_fala_local_rapida(
+        self,
+        comando: str,
+        *,
+        falar_feedback_imediato: bool = False,
+    ) -> str | None:
+        """Resolve solicitações localmente e executa ferramentas com verificação real no Windows."""
         t0 = time.perf_counter()
         comando_limpo = comando.strip()
 
@@ -213,7 +276,7 @@ class OrquestradorVoz:
             self.ultimo_llm_ttft_ms = 0.0
             return "[EMOCAO:amigavel] Tudo bem."
 
-        # 4. Confirmações pendentes ou comandos críticos de sistema (Portão Vermelho)
+        # 4. Confirmações pendentes (Portão Vermelho ou Recuperação Automática de Falha)
         resposta_sistema = self._processar_comando_sistema(comando_limpo)
         if resposta_sistema:
             self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resposta_sistema))
@@ -233,9 +296,10 @@ class OrquestradorVoz:
             self.ultimo_llm_ttft_ms = 0.0
             return resp_memoria
 
-        # 6. Interpretador de Intenções Naturais (respostas curtas e humanas para comandos simples!)
+        # 6. Interpretador de Intenções Naturais e Planejador Multietapas
         intencao = interpretar_intencao_natural(comando_limpo, self.contexto_conversa)
         if intencao is not None:
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
             if "novo_contexto" in intencao:
                 self.contexto_conversa.update(intencao["novo_contexto"])
 
@@ -243,53 +307,44 @@ class OrquestradorVoz:
                 resp_dir = intencao["resposta_direta"]
                 self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_dir))
                 self.ultima_origem_resposta = "cache_instantaneo"
-                self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
                 self.ultimo_llm_ttft_ms = 0.0
                 return resp_dir
 
             acao = intencao.get("acao", "")
-            params = intencao.get("parametros", {})
 
-            if acao == "modo_avatar":
-                modo_av = params.get("modo", "conversa")
-                self._evento_interno({"tipo": "modo", "nome": modo_av})
-                resp_modo = "[EMOCAO:amigavel] Feito."
-                self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_modo))
-                self.ultima_origem_resposta = "cache_instantaneo"
-                self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            # Execução sequencial de plano com múltiplas etapas verificadas
+            if acao == "plano_multietapas":
+                etapas = intencao.get("etapas", [])
+                if falar_feedback_imediato:
+                    self._evento_interno({"tipo": "pensando", "ativo": False})
+                    self.sintetizador.falar("Executando.")
+                mensagens_etapas: list[str] = []
+                for etapa in etapas:
+                    msg_etapa = self._executar_intencao_verificada(etapa, falar_feedback_imediato=False)
+                    mensagens_etapas.append(limpar_emocoes_texto(msg_etapa))
+                    if self.ultima_execucao and (
+                        self.ultima_execucao.estado != EstadoExecucao.SUCCESS
+                        or not self.ultima_execucao.verificado
+                    ):
+                        break
+
+                resp_plano = "[EMOCAO:satisfacao] " + " ".join(mensagens_etapas)
+                self.memoria.gravar_mensagem("voce", comando_limpo)
+                self.memoria.gravar_mensagem("assistente", resp_plano)
+                self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_plano))
+                self.ultima_origem_resposta = "plano_multietapas"
                 self.ultimo_llm_ttft_ms = 0.0
-                return resp_modo
+                return resp_plano
 
-            if acao in self._catalogo._ferramentas:
-                # Para abrir programas ou tocar mídia, responde "Abrindo." imediatamente e executa
-                if acao == "abrir_programa":
-                    threading.Thread(
-                        target=lambda: self._catalogo.executar(acao, params, auto_amarelo=True),
-                        daemon=True,
-                    ).start()
-                    resp_tool = "[EMOCAO:amigavel] Abrindo."
-                else:
-                    resultado = self._catalogo.executar(acao, params, auto_amarelo=True)
-                    saida = resultado.get("saida")
-                    if acao in ("obter_status_pc", "obter_status_gpu") and isinstance(saida, dict):
-                        foco = intencao.get("foco_resposta", "geral")
-                        resp_tool = formatar_resposta_telemetria(saida, foco=foco)
-                    elif acao == "listar_programas_usuario" and isinstance(saida, list):
-                        principais = ", ".join(saida[:8]) if saida else "nenhum aplicativo principal"
-                        resp_tool = f"[EMOCAO:concentracao] Estão abertos: {principais}."
-                    elif acao == "tocar_ou_pesquisar_midia":
-                        consulta = params.get("consulta", "")
-                        resp_tool = f"[EMOCAO:amigavel] Colocando {consulta}."
-                    elif acao == "controlar_midia":
-                        resp_tool = "[EMOCAO:amigavel] Feito."
-                    else:
-                        resp_tool = f"[EMOCAO:amigavel] {saida}"
-
+            if acao == "modo_avatar" or acao in self._catalogo._ferramentas:
+                resp_tool = self._executar_intencao_verificada(
+                    intencao,
+                    falar_feedback_imediato=falar_feedback_imediato,
+                )
                 self.memoria.gravar_mensagem("voce", comando_limpo)
                 self.memoria.gravar_mensagem("assistente", resp_tool)
                 self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_tool))
                 self.ultima_origem_resposta = "comando_local"
-                self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
                 self.ultimo_llm_ttft_ms = 0.0
                 return resp_tool
 
@@ -297,8 +352,8 @@ class OrquestradorVoz:
         return None
 
     def processar_fala_usuario(self, comando: str) -> str:
-        """Processa a fala do usuário (local ou via LLM) e retorna o texto completo."""
-        local = self.processar_fala_local_rapida(comando)
+        """Processa a fala do usuário (local verificada ou via LLM) e retorna o texto completo."""
+        local = self.processar_fala_local_rapida(comando, falar_feedback_imediato=False)
         if local is not None:
             return local
 
@@ -359,12 +414,10 @@ class OrquestradorVoz:
                     texto_completo_acumulado.append(pedaco)
                     buffer_atual += pedaco
 
-                    # Extrai emoções assim que aparecem
                     for _, emo in extrair_emocoes_texto(buffer_atual):
                         self._evento_interno({"tipo": "emocao", "nome": emo, "intensidade": 0.8})
                     buffer_atual = limpar_emocoes_texto(buffer_atual)
 
-                    # Emite cada sentença completa assim que um ponto final/interrogação/exclamação chega
                     while True:
                         m = re.search(r"^(.+?[.!?…])\s+(.*)$", buffer_atual, re.DOTALL)
                         if not m:
@@ -398,7 +451,7 @@ class OrquestradorVoz:
             self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resposta_final))
 
     def _loop_principal(self) -> None:
-        """Loop contínuo de captura, detecção direcionada, streaming LLM->TTS e registro de métricas."""
+        """Loop contínuo de captura, detecção direcionada, execução verificada e streaming LLM->TTS."""
         while not self._parar_evento.is_set():
             try:
                 agora = time.time()
@@ -410,6 +463,7 @@ class OrquestradorVoz:
                 if not em_janela_continua and self._em_conversa_ativa:
                     self._em_conversa_ativa = False
                     self.contexto_conversa["aguardando_escolha_midia"] = False
+                    self.contexto_conversa["aguardando_pesquisa_web"] = False
                     self._evento_interno({"tipo": "modo", "nome": "compacto"})
 
                 if self.sintetizador.audio_barge_in is not None:
@@ -447,7 +501,6 @@ class OrquestradorVoz:
                         continue
                     comando = texto.strip()
                 else:
-                    # Mesmo no modo por nome, aceita comandos claros direcionados se houver contexto recente (< 45s)
                     if (time.time() - self._ultimo_contato) < 45.0 and avaliar_fala_direcionada(texto, self.contexto_conversa, False) >= 0.88:
                         comando = texto.strip()
                     else:
@@ -460,8 +513,11 @@ class OrquestradorVoz:
                 self._evento_interno({"tipo": "modo", "nome": "conversa"})
                 self._evento_interno({"tipo": "pensando", "ativo": True})
 
-                # 1. Tenta resolução rápida local (< 5ms)
-                resposta_local = self.processar_fala_local_rapida(comando)
+                # 1. Tenta resolução rápida local e execução verificada no Windows
+                resposta_local = self.processar_fala_local_rapida(
+                    comando,
+                    falar_feedback_imediato=True,
+                )
                 if resposta_local is not None:
                     self._evento_interno({"tipo": "pensando", "ativo": False})
                     texto_fala = self._emitir_emocoes_e_limpar(resposta_local)
@@ -471,7 +527,6 @@ class OrquestradorVoz:
                     # 2. Resolução via LLM com Streaming Sentença-por-Sentença para o TTS
                     self._responder_com_llm_streaming(comando)
 
-                # Registra métricas reais do turno (p50 / p95 / TTFA)
                 metricas_voz_global.registrar(
                     modo_escuta=self.modo_escuta.value,
                     origem_resposta=self.ultima_origem_resposta,
@@ -489,7 +544,7 @@ class OrquestradorVoz:
                 time.sleep(0.3)
 
     def _processar_comando_sistema(self, comando: str) -> str | None:
-        """Confirma e executa comandos sensíveis protegidos pelo Portão Vermelho."""
+        """Confirma e executa comandos sensíveis ou alternativas de recuperação de falha."""
         agora = time.time()
         if self._confirmacao_pendente and agora > self._confirmacao_expira_em:
             self._confirmacao_pendente = None
@@ -498,28 +553,29 @@ class OrquestradorVoz:
         if self._confirmacao_pendente:
             confirmacao = resposta_confirmacao(comando)
             if confirmacao is None:
-                return "[EMOCAO:duvida] Diga sim para confirmar ou não para cancelar, Henry."
+                # Se não for sim/não claro, expira a confirmação pendente e deixa o fluxo avaliar o novo comando
+                self._confirmacao_pendente = None
+                self._parametros_pendentes = {}
+            else:
+                ferramenta = self._confirmacao_pendente
+                params = self._parametros_pendentes
+                self._confirmacao_pendente = None
+                self._parametros_pendentes = {}
 
-            ferramenta = self._confirmacao_pendente
-            params = self._parametros_pendentes
-            self._confirmacao_pendente = None
-            self._parametros_pendentes = {}
+                if not confirmacao:
+                    return "[EMOCAO:neutra] Tudo bem, cancelado."
 
-            if not confirmacao:
-                return "[EMOCAO:neutra] Cancelado."
-
-            resultado = self._catalogo.executar(
-                ferramenta,
-                params,
-                confirmar_fn=lambda _acao: True,
-                auto_amarelo=False,
-            )
-            if not resultado.get("ok"):
-                return str(resultado.get("motivo", "Não foi possível executar a ação."))
-            saida = resultado.get("saida")
-            if isinstance(saida, dict):
-                return str(saida.get("mensagem") or saida.get("erro") or "Concluído.")
-            return str(saida)
+                executor = self._obter_executor()
+                res = executor.executar(
+                    ferramenta,
+                    params,
+                    confirmado_pelo_usuario=True,
+                    auto_amarelo=True,
+                )
+                self.ultima_execucao = res
+                if res.estado != EstadoExecucao.SUCCESS or not res.verificado:
+                    return f"[EMOCAO:preocupacao] {res.mensagem_humana}"
+                return f"[EMOCAO:satisfacao] {res.mensagem_humana}"
 
         ferramenta = detectar_comando_sistema(comando)
         if not ferramenta:

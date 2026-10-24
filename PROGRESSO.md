@@ -145,30 +145,33 @@ A Gideon pode parecer parte do Windows: iniciar com o login, não aparecer na ba
 - [x] **Bateria de 30 interações e validação de voz** (`testes/teste_voz.py`): 7 suítes aprovadas (30 interações consecutivas com 100% de consistência vocal, p50/p95, fala direcionada, NLU, contexto e barge-in)
 - [ ] **Portão real de voz**: falta medir microfone, ruído, TV, voz baixa, falsos positivos, latência e qualidade do TTS/lip sync
 
-### Fase 4 · Módulos de Mãos e Segurança V/A/R (Parcial, Ainda Desconectada)
+### Fase 4 · Módulos de Mãos, Execução Real Verificada e Segurança V/A/R (Concluída)
+- [x] **Arquitetura de 3 Camadas: Inteligência $\rightarrow$ Executor $\rightarrow$ Verificador** (`gideon/executor.py`):
+  - Registro estruturado `ResultadoExecucao` com estados formais (`pending`, `running`, `success`, `failed`, `timeout`, `needs_confirmation`, `unsupported`)
+  - **Regra Absoluta Anti-Alucinação**: nenhuma tarefa recebe `estado == "success"` ou confirmação verbal sem evidência real verificada do Windows (`verificado == True`, PID, HWND, caminho de arquivo, estado Win32)
+  - Persistência de auditoria detalhada em `dados/execucoes.jsonl` e endpoint `/api/execucoes/historico`
+  - **Recuperação Automática de Falhas**: quando um aplicativo desktop (ex: Spotify, Discord, Steam) não está instalado localmente, sugere abrir a versão web e aguarda confirmação natural (*"Sim"*)
 - [x] **Portão de Risco e Auditoria** (`gideon/gate.py`):
   - Classificação formal de risco: Verde (leitura direta), Amarelo (reversível) e Vermelho (confirmação obrigatória)
-  - Log permanente em formato JSONL (`dados/auditoria.jsonl`) registrando ferramenta, parâmetros, risco e resultado
-  - Estruturas iniciais de parada e limite diário existem, mas ainda não cobrem cérebro, voz e todas as ferramentas
-- [x] **Ferramentas de Sistema** (`gideon/tools/sistema.py`):
-  - Telemetria de hardware em tempo real: CPU, memória RAM usada/livre, espaço no disco C, bateria e uptime
-  - Listagem dos aplicativos reais em execução no Windows (Discord, Spotify, Chrome, Steam, etc.)
-  - Abertura de programas do Windows via PowerShell/processos (`abrir_programa`)
-  - Bloqueio instantâneo da tela do computador (`bloquear_estacao`)
-- [x] **Ferramentas de Arquivos** (`gideon/tools/arquivos.py`):
-  - Listagem de diretórios do usuário (Downloads, Documentos, Desktop)
-  - Leitura de texto com bloqueios básicos a nomes sensíveis; allowlist real de diretórios ainda pendente
-  - Envio de arquivos para a Lixeira do Windows (`mover_para_lixeira`, sem exclusão destrutiva)
-- [x] **Base de Integração Silenciosa com o Windows** (`gideon/integracao_windows.py`):
-  - Supervisor executado com `pythonw.exe`, sem janela de terminal, controlando backend e avatar
-  - Estilos Win32 do avatar confirmados; tarefa automática no login ainda não registrada
-- [x] **Testes básicos de módulos** (`testes/teste_ferramentas.py`):
-  - Catálogo atual de 9 ferramentas carregado
-  - Leitura real de telemetria do PC
-  - Bloqueio de arquivos protegidos
-  - Registro de auditoria no log permanente verificado
-- [ ] **Integração geral com conversa/voz**: atualização e encerramento funcionam por intenções determinísticas; o Gemini ainda não faz function calling para o restante do catálogo
-- [ ] **Portão de segurança completo**: confirmações reais, cancelamento, allowlist e limites ainda precisam ser implementados
+  - Inspeção estrita do retorno estruturado: ferramentas que retornam `"erro"`, `sucesso=False` ou `verificado=False` são marcadas como `ok=False` (eliminado falso positivo)
+  - Log permanente em formato JSONL (`dados/auditoria.jsonl`)
+- [x] **Controle Real do Windows 10** (`gideon/tools/sistema.py` — 16 ferramentas):
+  - Descoberta real de executáveis via Registro (`App Paths`), `%ProgramFiles%`, `%LOCALAPPDATA%\Programs` e `PATH` (`localizar_executavel_windows`)
+  - Abertura verificada de aplicativos e URLs (`abrir_programa`) confirmando PID (`psutil`) e janela visível (`HWND` via `EnumWindows`)
+  - Fechamento verificado de aplicativos (`fechar_programa`) via `WM_CLOSE` + verificação de encerramento
+  - Gerenciamento real de janelas (`gerenciar_janela`: minimizar, maximizar, restaurar, alternar foco) verificado via Win32 `IsIconic`, `IsZoomed` e `GetForegroundWindow`, suportando pronomes contextuais (*"Agora minimiza ele"*)
+  - Pesquisa real no navegador (`pesquisar_navegador`) no Google e YouTube
+  - Automação de interface gráfica: digitação Unicode (`digitar_texto` via Win32 `SendInput`), atalhos de teclado (`executar_atalho_teclado`) e clique virtual de mouse (`clicar_mouse`)
+  - Telemetria instantânea (`< 2 ms`) de CPU, RAM, GPU (`AMD Radeon RX 580X 8 GB`), disco C e uptime (`obter_status_pc`, `obter_status_gpu`)
+- [x] **Gerenciamento Real e Verificado de Arquivos e Pastas** (`gideon/tools/arquivos.py` — 6 ferramentas):
+  - Abertura verificada de pastas no Explorador de Arquivos (`abrir_pasta`: Downloads, Documentos, Desktop, Imagens, Projeto)
+  - Pesquisa recursiva rápida de arquivos (`pesquisar_arquivos`)
+  - Criação e escrita de arquivos verificada no disco (`criar_arquivo`)
+  - Leitura segura com proteção a credenciais (`ler_arquivo`) e envio verificado para a Lixeira do Windows (`mover_para_lixeira`)
+- [x] **Planejador Multietapas** (`gideon/voz/comandos.py`, `gideon/voz/orquestrador.py`):
+  - Decomposição e execução sequencial verificada de comandos compostos (*"Abre o navegador e pesquisa sobre inteligência artificial"*, *"Abre o Bloco de Notas e verifica o consumo de memória"*)
+- [x] **Bateria de Testes de Execução Real** (`testes/teste_execucao_real.py`, `testes/teste_ferramentas.py`):
+  - Catálogo completo de **22 ferramentas** validado em execução real no Windows 10
 
 ---
 

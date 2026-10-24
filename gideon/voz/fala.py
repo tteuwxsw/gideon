@@ -38,12 +38,15 @@ TOM_VOZ_FIXO = "+0Hz"
 # Frases curtas de uso frequente pré-aquecidas em cache para resposta instantânea (< 5ms)
 FRASES_PRE_AQUECIMENTO = (
     "Abrindo.",
+    "Executando.",
     "Tudo bem.",
     "Estou aqui, Henry.",
     "Pois não, Henry.",
     "Feito.",
     "Cancelado.",
     "Claro. O que gostaria de ouvir?",
+    "Pronto, Google Chrome aberto.",
+    "Pronto, Bloco de Notas aberto.",
     "Abrindo o Chrome.",
     "Abrindo o Spotify.",
     "Pausado.",
