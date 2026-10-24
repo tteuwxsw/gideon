@@ -5,7 +5,7 @@ extends Node3D
 ## Gerencia micro-animações locais (piscar, respiração, olhar),
 ## sincronização com WebSocket, controle de expressões e arrastar da janela.
 
-@export var ws_client: GideonWSClient
+@export var ws_client: Node
 @export var mesh_avatar: MeshInstance3D
 @export var anim_player: AnimationPlayer
 
