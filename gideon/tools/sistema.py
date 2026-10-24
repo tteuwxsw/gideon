@@ -105,6 +105,19 @@ def bloquear_estacao() -> str:
     return "Estação de trabalho bloqueada com sucesso."
 
 
+def encerrar_gideon() -> str:
+    """Encerra completamente todos os processos, ouvidos e holograma da Gideon."""
+    import threading
+
+    def _desligar():
+        time.sleep(2.0)
+        subprocess.run(["taskkill", "/F", "/IM", "Godot_v4.7.2-stable_win64.exe"], capture_output=True)
+        os._exit(0)
+
+    threading.Thread(target=_desligar, daemon=True).start()
+    return "Encerrando todos os subsistemas da Gideon. Até logo, Henry."
+
+
 # ─── Registro das Ferramentas no Padrão do Portão de Risco ────
 
 FERRAMENTAS_SISTEMA = [
@@ -135,5 +148,12 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=bloquear_estacao,
         frase=lambda **kwargs: "bloquear a tela do computador",
+    ),
+    Ferramenta(
+        nome="encerrar_gideon",
+        descricao="Encerra e desliga completamente todos os processos e o holograma da Gideon quando o Henry pedir para fechar.",
+        risco=Risco.AMARELO,
+        executar=encerrar_gideon,
+        frase=lambda **kwargs: "encerrar e fechar a Gideon completamente",
     ),
 ]
