@@ -64,10 +64,11 @@
   - Detector de energia/silêncio (VAD) automático
   - Transcrição ultra-rápida local com **Faster-Whisper** (`base`, int8, em português)
   - Reconhecimento da palavra de chamada (*"Gideon"* e variações fonéticas)
-- [x] **Síntese Vocal Local** (`gideon/voz/fala.py`):
-  - Motor de fala nativo do Windows (Microsoft Maria Desktop) com zero latência e 100% offline
-  - Suporte a Kokoro ONNX neural de alta fidelidade
-  - Transmissão de eventos de sincronia labial (lip sync) para o avatar durante a fala
+- [x] **Síntese Vocal Neural Humanizada** (`gideon/voz/fala.py`):
+  - Motor Neural HD principal (`pt-BR-ThalitaMultilingualNeural` e `pt-BR-FranciscaNeural` em 24 kHz) com entonação, respiração e cadência humanas
+  - Análise da onda sonora (envelope RMS em tempo real) para sincronia labial fiel no avatar 3D
+  - Limpeza automática de marcações Markdown antes da fala
+  - Fallback automático para Kokoro ONNX e Microsoft Maria Desktop offline
 - [x] **Orquestrador Mãos-Livres** (`gideon/voz/orquestrador.py`):
   - Ciclo completo: Ouve "Gideon" -> Materializa avatar -> Processa resposta -> Fala com boca mexendo -> Aguarda follow-up por 12s
 - [x] **Flag CLI `--voz`**: Inicia o servidor com o ouvinte mãos-livres ativo direto do terminal
@@ -126,7 +127,7 @@
 
 ### Fases 6–9 · Automações, Proatividade e Integrações
 - [x] Inicialização 100% oculta junto com o Windows (`gideon/integracao_windows.py` via `pythonw.exe`)
-- [ ] Importação de malha de rosto feminino com 52 blendshapes faciais (pasta `gideon_avatar/modelos/` criada e scripts preparados)
+- [x] **Rosto Feminino 3D Realista** (`gideon_avatar/modelos/gideon.glb`) instalado e integrado com **72 blendshapes** (52 ARKit + 15 Visemas Oculus), sacadas oculares vivas, piscar natural e shader holográfico que preserva olhos, íris e lábios
 - [ ] Rotina matinal falada por horário com relógio de parede
 - [ ] Integração com WhatsApp / Telegram (áudio no bolso)
 - [ ] Encadeamento de automações (gatilhos e tarefas autônomas)
@@ -142,12 +143,12 @@
 | Transparência da Janela | `MOUSE_PASSTHROUGH = true` | Cliques do mouse atravessam o holograma; não atrapalha o uso do PC |
 | Cérebro | Google Gemini (`gemini-3.1-flash-lite`) | Raciocínio de ponta, custo gratuito e respostas rápidas |
 | Ouvido | Faster-Whisper (`base`, int8) | Transcrição local em português sem latência de rede |
-| Voz | Microsoft Maria Desktop + Kokoro ONNX | Voz feminina natural rodando 100% no computador |
-| Avatar 3D | Godot 4 | Janela transparente nativa no Windows, shaders cinematográficos, leve |
-| Formato do Rosto | `.glb` (ARKit Blendshapes) | Padrão da indústria com sincronia labial e piscar natural |
+| Voz | Neural HD (`ThalitaMultilingualNeural` / `FranciscaNeural`) + Fallbacks | Voz feminina brasileira ultra-humanizada com lip-sync por onda sonora (RMS) |
+| Avatar 3D | Godot 4 + `gideon.glb` (72 Blendshapes) | Rosto feminino realista com shader holográfico azul, olhos vivos e visemas |
+| Formato do Rosto | `.glb` (ARKit + Oculus Visemes) | Padrão da indústria com sincronia labial multi-visema e piscar natural |
 | Memória | SQLite FTS5 Local | Fatos permanentes com busca insensível a acentos |
 | Segurança | Cofre do Windows (`keyring`) + Token Local | Chaves e comandos protegidos localmente |
 
 ---
 
-*Atualizado em: 24/10/2026 01:45*
+*Atualizado em: 24/10/2026 02:12*

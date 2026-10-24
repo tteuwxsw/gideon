@@ -90,31 +90,35 @@ func _processar_mensagem(texto_json: String) -> void:
         return
 
     var tipo = dados.get("tipo", "")
-    evento_recebido.emit(tipo, dados)
+    var payload: Dictionary = dados
+    if dados.has("dados") and typeof(dados["dados"]) == TYPE_DICTIONARY:
+        payload = dados["dados"]
+
+    evento_recebido.emit(tipo, payload)
 
     match tipo:
         "emocao":
-            var nome = dados.get("nome", "neutra")
-            var intensidade = float(dados.get("intensidade", 1.0))
+            var nome = payload.get("nome", dados.get("nome", "neutra"))
+            var intensidade = float(payload.get("intensidade", dados.get("intensidade", 1.0)))
             emocao_alterada.emit(nome, intensidade)
 
         "fala_inicio":
-            var texto = dados.get("texto", "")
+            var texto = payload.get("texto", dados.get("texto", ""))
             fala_iniciada.emit(texto)
 
         "fala_chunk":
-            var texto = dados.get("texto", "")
+            var texto = str(payload.get("texto", dados.get("texto", "")))
             fala_chunk.emit(texto)
 
         "fala_fim":
             fala_finalizada.emit()
 
         "pensando":
-            var ativo = bool(dados.get("ativo", false))
+            var ativo = bool(payload.get("ativo", dados.get("ativo", false)))
             pensando_alterado.emit(ativo)
 
         "modo":
-            var modo = dados.get("nome", "conversa")
+            var modo = payload.get("modo", payload.get("nome", dados.get("nome", "conversa")))
             modo_alterado.emit(modo)
 
 

@@ -7,29 +7,32 @@
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_hologram"]
 render_priority = 0
 shader = ExtResource("3_shader")
-shader_parameter/cor_holograma = Color(0, 0.55, 1, 0.7)
-shader_parameter/cor_fresnel = Color(0.1, 0.95, 1, 1)
-shader_parameter/forca_fresnel = 2.5
-shader_parameter/densidade_scanlines = 140.0
-shader_parameter/velocidade_scanlines = 1.8
-shader_parameter/intensidade_scanlines = 0.25
+shader_parameter/preservar_detalhes_rosto = 0.72
+shader_parameter/cor_holograma = Color(0.08, 0.68, 1, 0.92)
+shader_parameter/cor_fresnel = Color(0.35, 0.96, 1, 1)
+shader_parameter/forca_fresnel = 2.8
+shader_parameter/densidade_scanlines = 260.0
+shader_parameter/velocidade_scanlines = 1.4
+shader_parameter/intensidade_scanlines = 0.14
 shader_parameter/velocidade_pulso = 1.2
-shader_parameter/intensidade_pulso = 0.08
-shader_parameter/opacidade_geral = 0.85
+shader_parameter/intensidade_pulso = 0.05
+shader_parameter/opacidade_geral = 0.94
+shader_parameter/corte_pescoco_min = 1.43
+shader_parameter/corte_pescoco_max = 1.49
 
 [sub_resource type="SphereMesh" id="SphereMesh_head"]
 material = SubResource("ShaderMaterial_hologram")
-radius = 0.35
-height = 0.75
+radius = 0.12
+height = 0.25
 
 [sub_resource type="Environment" id="Environment_glow"]
 background_mode = 0
 glow_enabled = true
-glow_levels/1 = 0.8
-glow_levels/2 = 0.6
-glow_intensity = 1.2
-glow_strength = 1.1
-glow_bloom = 0.3
+glow_levels/1 = 0.7
+glow_levels/2 = 0.5
+glow_intensity = 0.85
+glow_strength = 0.95
+glow_bloom = 0.18
 glow_blend_mode = 0
 
 [node name="GideonAvatar" type="Node3D" node_paths=PackedStringArray("ws_client", "mesh_avatar")]
@@ -44,7 +47,8 @@ script = ExtResource("2_ws_client")
 environment = SubResource("Environment_glow")
 
 [node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1.4)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.015, 0.44)
+fov = 38.0
 current = true
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]

@@ -1,44 +1,58 @@
 class_name GideonAvatarController
 extends Node3D
 
-## Controlador principal do avatar holográfico da Gideon.
-## Gerencia micro-animações locais (piscar, respiração, olhar),
-## sincronização com WebSocket, controle de expressões e arrastar da janela.
+## Controlador principal do avatar holográfico 3D realista da Gideon.
+## Carrega a malha feminina com 72 blendshapes (ARKit + Oculus Visemes),
+## aplica o shader holográfico preservando olhos, lábios e feições,
+## e gerencia micro-animações humanas (piscar, sacadas oculares, respiração e lip-sync).
 
 @export var ws_client: Node
 @export var mesh_avatar: MeshInstance3D
 @export var anim_player: AnimationPlayer
+@export var caminho_modelo_glb: String = "res://modelos/gideon.glb"
 
 # Modos de exibição da janela do Windows
 enum ModoJanela { COMPACTO, CONVERSA, FOCO, OPERACIONAL, OCULTO }
 var modo_atual: ModoJanela = ModoJanela.CONVERSA
 
-# Controle de arrastar da janela
-var _arrastando_janela: bool = false
-var _posicao_clique_inicial: Vector2i = Vector2i.ZERO
+# Malhas com blendshapes faciais (Wolf3D_Head, EyeLeft, EyeRight, Wolf3D_Teeth)
+var _malhas_faciais: Array[MeshInstance3D] = []
+var _pivo_cabeca: Node3D = null
+var _shader_holograma: Shader = preload("res://shaders/holograma.gdshader")
 
 # Micro-idle: Piscar natural independente do cérebro
-var _timer_proximo_piscar: float = 3.5
-var _duracao_piscar: float = 0.15
+var _timer_proximo_piscar: float = 2.8
+var _duracao_piscar: float = 0.14
 var _piscando: bool = false
 var _tempo_piscar_atual: float = 0.0
 
-# Micro-idle: Olhar e respiração sutil
+# Micro-idle: Sacadas oculares (movimento vivo dos olhos)
+var _timer_sacada_olhos: float = 2.0
+var _olhar_alvo: Vector2 = Vector2.ZERO
+var _olhar_atual: Vector2 = Vector2.ZERO
+
+# Micro-idle: Inclinação de cabeça e respiração sutil
 var _tempo_acumulado: float = 0.0
 var _alvo_rotacao_cabeca: Vector3 = Vector3.ZERO
-var _timer_mudar_olhar: float = 5.0
+var _timer_mudar_olhar: float = 4.5
 
 # Expressão facial atual
 var _emocao_alvo: String = "neutra"
 var _intensidade_emocao: float = 1.0
 
-# Estado de fala
+# Estado de fala e sincronia labial multi-visema
 var _falando: bool = false
+var _energia_voz: float = 0.0
+var _energia_voz_alvo: float = 0.0
 var _abertura_boca: float = 0.0
+
+# Controle de movimentação suave da janela (Tween)
+var _tween_janela: Tween
 
 
 func _ready() -> void:
     _configurar_janela()
+    _carregar_modelo_realista()
 
     if ws_client:
         ws_client.emocao_alterada.connect(_on_emocao_alterada)
@@ -47,6 +61,7 @@ func _ready() -> void:
         ws_client.fala_finalizada.connect(_on_fala_finalizada)
         ws_client.pensando_alterado.connect(_on_pensando_alterado)
         ws_client.modo_alterado.connect(_on_modo_alterado)
+        ws_client.evento_recebido.connect(_on_evento_recebido)
 
 
 func _configurar_janela() -> void:
@@ -55,13 +70,108 @@ func _configurar_janela() -> void:
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_TRANSPARENT, true, janela_id)
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, true, janela_id)
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true, janela_id)
-    
-    # Cliques do mouse atravessam o holograma — ela é uma entidade puramente visual
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_MOUSE_PASSTHROUGH, true, janela_id)
 
 
+func _carregar_modelo_realista() -> void:
+    var caminho_absoluto = ProjectSettings.globalize_path(caminho_modelo_glb)
+    if not FileAccess.file_exists(caminho_absoluto) and not FileAccess.file_exists(caminho_modelo_glb):
+        print("[Gideon Avatar] Modelo GLB não encontrado, usando malha base.")
+        if mesh_avatar:
+            _malhas_faciais.append(mesh_avatar)
+        return
+
+    var doc = GLTFDocument.new()
+    var state = GLTFState.new()
+    var err = doc.append_from_file(caminho_absoluto, state)
+    if err != OK:
+        push_warning("[Gideon Avatar] Falha ao carregar GLB: " + str(err))
+        if mesh_avatar:
+            _malhas_faciais.append(mesh_avatar)
+        return
+
+    var cena_modelo = doc.generate_scene(state)
+    if not cena_modelo:
+        return
+
+    # Oculta a esfera placeholder
+    if mesh_avatar:
+        mesh_avatar.visible = false
+
+    # Cria pivô centralizado na altura do rosto (Y = 1.585m na malha original)
+    _pivo_cabeca = Node3D.new()
+    _pivo_cabeca.name = "PivoCabecaRealista"
+    add_child(_pivo_cabeca)
+
+    cena_modelo.position = Vector3(0.0, -1.585, 0.0)
+    _pivo_cabeca.add_child(cena_modelo)
+
+    _configurar_nos_modelo(cena_modelo)
+    # Aplica expressão serena inicial da Gideon (leve sorriso acolhedor)
+    _aplicar_expressao_base()
+    print("[Gideon Avatar] Rosto feminino 3D carregado com ", _malhas_faciais.size(), " camadas faciais e 72 blendshapes.")
+
+
+func _configurar_nos_modelo(no: Node) -> void:
+    if no is MeshInstance3D:
+        var nome_no = no.name
+        # Oculta óculos e corpo inferior para exibir apenas o busto/rosto flutuante como em The Flash
+        if nome_no in ["Wolf3D_Glasses", "Wolf3D_Outfit_Bottom", "Wolf3D_Outfit_Footwear", "Wolf3D_Body", "Wolf3D_Outfit_Top"]:
+            no.visible = false
+        else:
+            _aplicar_material_holografico(no)
+            if no.get_blend_shape_count() > 0:
+                _malhas_faciais.append(no)
+
+    for filho in no.get_children():
+        _configurar_nos_modelo(filho)
+
+
+func _aplicar_material_holografico(malha: MeshInstance3D) -> void:
+    if not malha.mesh:
+        return
+
+    var qtd_superficies = malha.mesh.get_surface_count()
+    for i in range(qtd_superficies):
+        var mat_orig = malha.mesh.surface_get_material(i)
+        var mat_holo = ShaderMaterial.new()
+        mat_holo.shader = _shader_holograma
+
+        # Parâmetros padrão do holograma Time Vault
+        mat_holo.set_shader_parameter("cor_holograma", Color(0.08, 0.68, 1.0, 0.92))
+        mat_holo.set_shader_parameter("cor_fresnel", Color(0.35, 0.96, 1.0, 1.0))
+        mat_holo.set_shader_parameter("forca_fresnel", 2.8)
+        mat_holo.set_shader_parameter("densidade_scanlines", 260.0)
+        mat_holo.set_shader_parameter("velocidade_scanlines", 1.4)
+        mat_holo.set_shader_parameter("intensidade_scanlines", 0.14)
+        mat_holo.set_shader_parameter("opacidade_geral", 0.94)
+        mat_holo.set_shader_parameter("corte_pescoco_min", 1.43)
+        mat_holo.set_shader_parameter("corte_pescoco_max", 1.49)
+
+        # Preserva a textura realista dos olhos, íris, lábios e pele sob o feixe holográfico
+        if mat_orig is BaseMaterial3D and mat_orig.albedo_texture:
+            mat_holo.set_shader_parameter("textura_base", mat_orig.albedo_texture)
+            if malha.name in ["EyeLeft", "EyeRight"]:
+                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.88)
+                mat_holo.set_shader_parameter("opacidade_geral", 0.98)
+            elif malha.name == "Wolf3D_Hair":
+                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.55)
+                mat_holo.set_shader_parameter("opacidade_geral", 0.85)
+            else:
+                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.72)
+
+        malha.set_surface_override_material(i, mat_holo)
+
+
+func _aplicar_expressao_base() -> void:
+    # Semblante sereno, vivo e acolhedor característico da Gideon
+    _aplicar_blendshape("mouthSmileLeft", 0.16)
+    _aplicar_blendshape("mouthSmileRight", 0.16)
+    _aplicar_blendshape("browInnerUp", 0.08)
+
+
 func _input(_event: InputEvent) -> void:
-    # Nenhuma interação por mouse: controle 100% por voz e inteligência da Gideon
+    # Controle 100% por voz e inteligência da Gideon
     pass
 
 
@@ -69,29 +179,54 @@ func _process(delta: float) -> void:
     _tempo_acumulado += delta
 
     _atualizar_micro_idle(delta)
+    _atualizar_olhar_vivo(delta)
     _atualizar_piscar(delta)
     _atualizar_fala(delta)
 
 
 func _atualizar_micro_idle(delta: float) -> void:
     # 1. Flutuação suave (respiração holográfica)
-    var flutuacao_y = sin(_tempo_acumulado * 1.5) * 0.015
+    var flutuacao_y = sin(_tempo_acumulado * 1.5) * 0.008
     position.y = flutuacao_y
 
-    # 2. Variação sutil de olhar/inclinação de cabeça a cada 4 a 8 segundos
+    # 2. Variação sutil de olhar/inclinação de cabeça a cada 4 a 7 segundos
     _timer_mudar_olhar -= delta
     if _timer_mudar_olhar <= 0.0:
-        _timer_mudar_olhar = randf_range(4.0, 8.0)
+        _timer_mudar_olhar = randf_range(3.8, 7.2)
         _alvo_rotacao_cabeca = Vector3(
-            deg_to_rad(randf_range(-3.0, 3.0)),
-            deg_to_rad(randf_range(-6.0, 6.0)),
+            deg_to_rad(randf_range(-2.5, 2.5)),
+            deg_to_rad(randf_range(-5.5, 5.5)),
             deg_to_rad(randf_range(-2.0, 2.0))
         )
 
-    # Interpolação suave para a rotação alvo
-    rotation.x = lerp_angle(rotation.x, _alvo_rotacao_cabeca.x, delta * 2.0)
-    rotation.y = lerp_angle(rotation.y, _alvo_rotacao_cabeca.y, delta * 2.0)
-    rotation.z = lerp_angle(rotation.z, _alvo_rotacao_cabeca.z, delta * 2.0)
+    var alvo_no = _pivo_cabeca if _pivo_cabeca else self
+    alvo_no.rotation.x = lerp_angle(alvo_no.rotation.x, _alvo_rotacao_cabeca.x, delta * 2.2)
+    alvo_no.rotation.y = lerp_angle(alvo_no.rotation.y, _alvo_rotacao_cabeca.y, delta * 2.2)
+    alvo_no.rotation.z = lerp_angle(alvo_no.rotation.z, _alvo_rotacao_cabeca.z, delta * 2.2)
+
+
+func _atualizar_olhar_vivo(delta: float) -> void:
+    # Micro-sacadas oculares naturais para que os olhos pareçam humanos e atentos
+    _timer_sacada_olhos -= delta
+    if _timer_sacada_olhos <= 0.0:
+        _timer_sacada_olhos = randf_range(1.5, 4.0)
+        _olhar_alvo = Vector2(randf_range(-0.22, 0.22), randf_range(-0.15, 0.15))
+
+    _olhar_atual = _olhar_atual.lerp(_olhar_alvo, delta * 8.0)
+
+    var olhando_dir = max(0.0, _olhar_atual.x)
+    var olhando_esq = max(0.0, -_olhar_atual.x)
+    var olhando_cima = max(0.0, _olhar_atual.y)
+    var olhando_baixo = max(0.0, -_olhar_atual.y)
+
+    _aplicar_blendshape("eyeLookOutRight", olhando_dir)
+    _aplicar_blendshape("eyeLookInLeft", olhando_dir)
+    _aplicar_blendshape("eyeLookOutLeft", olhando_esq)
+    _aplicar_blendshape("eyeLookInRight", olhando_esq)
+    _aplicar_blendshape("eyeLookUpLeft", olhando_cima)
+    _aplicar_blendshape("eyeLookUpRight", olhando_cima)
+    _aplicar_blendshape("eyeLookDownLeft", olhando_baixo)
+    _aplicar_blendshape("eyeLookDownRight", olhando_baixo)
 
 
 func _atualizar_piscar(delta: float) -> void:
@@ -100,7 +235,7 @@ func _atualizar_piscar(delta: float) -> void:
         if _timer_proximo_piscar <= 0.0:
             _piscando = true
             _tempo_piscar_atual = 0.0
-            _timer_proximo_piscar = randf_range(3.0, 6.5)
+            _timer_proximo_piscar = randf_range(2.6, 5.8)
     else:
         _tempo_piscar_atual += delta
         var progresso = _tempo_piscar_atual / _duracao_piscar
@@ -110,7 +245,6 @@ func _atualizar_piscar(delta: float) -> void:
             _aplicar_blendshape("eyeBlinkLeft", 0.0)
             _aplicar_blendshape("eyeBlinkRight", 0.0)
         else:
-            # Sobe até 1.0 na metade do tempo, desce até 0.0 na outra
             var peso_piscar = sin(progresso * PI)
             _aplicar_blendshape("eyeBlinkLeft", peso_piscar)
             _aplicar_blendshape("eyeBlinkRight", peso_piscar)
@@ -118,22 +252,50 @@ func _atualizar_piscar(delta: float) -> void:
 
 func _atualizar_fala(delta: float) -> void:
     if _falando:
-        # Simula movimento labial natural sincronizado com as sílabas
-        _abertura_boca = (sin(_tempo_acumulado * 14.0) + 1.0) * 0.5 * 0.8
+        _energia_voz = lerp(_energia_voz, _energia_voz_alvo, delta * 18.0)
+        # Combina a energia real da voz neural com articulação multi-visema natural
+        var mod_silaba = (sin(_tempo_acumulado * 15.0) + 1.0) * 0.5
+        var mod_vogal_o = (sin(_tempo_acumulado * 9.5 + 1.2) + 1.0) * 0.5
+        var mod_vogal_e = (cos(_tempo_acumulado * 12.0) + 1.0) * 0.5
+
+        var intensidade = clamp(_energia_voz if _energia_voz > 0.05 else mod_silaba * 0.65, 0.0, 1.0)
+        _abertura_boca = intensidade * 0.55
+
         _aplicar_blendshape("jawOpen", _abertura_boca)
+        _aplicar_blendshape("mouthOpen", _abertura_boca * 0.7)
+        _aplicar_blendshape("viseme_aa", intensidade * mod_silaba * 0.55)
+        _aplicar_blendshape("viseme_O", intensidade * mod_vogal_o * 0.38)
+        _aplicar_blendshape("viseme_E", intensidade * mod_vogal_e * 0.35)
+        _aplicar_blendshape("viseme_SS", intensidade * (1.0 - mod_silaba) * 0.25)
     else:
-        _abertura_boca = lerp(_abertura_boca, 0.0, delta * 10.0)
+        _abertura_boca = lerp(_abertura_boca, 0.0, delta * 12.0)
+        _energia_voz = lerp(_energia_voz, 0.0, delta * 12.0)
         _aplicar_blendshape("jawOpen", _abertura_boca)
+        _aplicar_blendshape("mouthOpen", _abertura_boca)
+        _aplicar_blendshape("viseme_aa", 0.0)
+        _aplicar_blendshape("viseme_O", 0.0)
+        _aplicar_blendshape("viseme_E", 0.0)
+        _aplicar_blendshape("viseme_SS", 0.0)
 
 
 func _aplicar_blendshape(nome: String, peso: float) -> void:
-    if mesh_avatar and mesh_avatar.mesh:
-        var idx = mesh_avatar.find_blend_shape_by_name(nome)
-        if idx >= 0:
-            mesh_avatar.set_blend_shape_value(idx, clamp(peso, 0.0, 1.0))
+    var valor = clamp(peso, 0.0, 1.0)
+    for malha in _malhas_faciais:
+        if malha and malha.mesh:
+            var idx = malha.find_blend_shape_by_name(nome)
+            if idx >= 0:
+                malha.set_blend_shape_value(idx, valor)
 
 
 # ─── Sinais do WebSocket ──────────────────────────────────────
+
+func _on_evento_recebido(tipo: String, dados: Dictionary) -> void:
+    if tipo == "fala_chunk":
+        if dados.has("intensidade"):
+            _energia_voz_alvo = float(dados.get("intensidade", 0.65))
+        else:
+            _energia_voz_alvo = randf_range(0.35, 0.85)
+
 
 func _on_emocao_alterada(nome: String, intensidade: float) -> void:
     _emocao_alvo = nome
@@ -141,23 +303,35 @@ func _on_emocao_alterada(nome: String, intensidade: float) -> void:
     print("[Gideon Avatar] Expressando emoção: ", nome, " (intensidade: ", intensidade, ")")
 
     match nome:
-        "amigavel", "satisfacao":
-            _aplicar_blendshape("mouthSmileLeft", 0.6 * intensidade)
-            _aplicar_blendshape("mouthSmileRight", 0.6 * intensidade)
+        "amigavel", "satisfacao", "humor":
+            _aplicar_blendshape("mouthSmileLeft", 0.55 * intensidade)
+            _aplicar_blendshape("mouthSmileRight", 0.55 * intensidade)
+            _aplicar_blendshape("cheekSquintLeft", 0.3 * intensidade)
+            _aplicar_blendshape("cheekSquintRight", 0.3 * intensidade)
         "curiosidade", "duvida":
-            _aplicar_blendshape("browInnerUp", 0.7 * intensidade)
-            _alvo_rotacao_cabeca.z = deg_to_rad(6.0) # Inclina levemente a cabeça
+            _aplicar_blendshape("browInnerUp", 0.65 * intensidade)
+            _aplicar_blendshape("browOuterUpRight", 0.45 * intensidade)
+            _alvo_rotacao_cabeca.z = deg_to_rad(5.0)
         "surpresa":
-            _aplicar_blendshape("eyeWideLeft", 0.8 * intensidade)
-            _aplicar_blendshape("eyeWideRight", 0.8 * intensidade)
-        "neutra":
-            _aplicar_blendshape("mouthSmileLeft", 0.0)
-            _aplicar_blendshape("mouthSmileRight", 0.0)
-            _aplicar_blendshape("browInnerUp", 0.0)
+            _aplicar_blendshape("eyeWideLeft", 0.7 * intensidade)
+            _aplicar_blendshape("eyeWideRight", 0.7 * intensidade)
+            _aplicar_blendshape("browInnerUp", 0.6 * intensidade)
+        "concentracao", "preocupacao":
+            _aplicar_blendshape("browDownLeft", 0.45 * intensidade)
+            _aplicar_blendshape("browDownRight", 0.45 * intensidade)
+        "neutra", _:
+            _aplicar_blendshape("mouthSmileLeft", 0.16)
+            _aplicar_blendshape("mouthSmileRight", 0.16)
+            _aplicar_blendshape("browInnerUp", 0.08)
+            _aplicar_blendshape("browDownLeft", 0.0)
+            _aplicar_blendshape("browDownRight", 0.0)
+            _aplicar_blendshape("eyeWideLeft", 0.0)
+            _aplicar_blendshape("eyeWideRight", 0.0)
 
 
 func _on_fala_iniciada(_texto: String) -> void:
     _falando = true
+    _energia_voz_alvo = 0.65
 
 
 func _on_fala_chunk(_texto: String) -> void:
@@ -166,22 +340,17 @@ func _on_fala_chunk(_texto: String) -> void:
 
 func _on_fala_finalizada() -> void:
     _falando = false
+    _energia_voz_alvo = 0.0
 
 
 func _on_pensando_alterado(ativo: bool) -> void:
     if ativo:
-        # Vira levemente o olhar para cima enquanto processa a resposta
-        _alvo_rotacao_cabeca = Vector3(deg_to_rad(-4.0), deg_to_rad(3.0), 0.0)
+        _alvo_rotacao_cabeca = Vector3(deg_to_rad(-3.5), deg_to_rad(3.0), 0.0)
     else:
         _alvo_rotacao_cabeca = Vector3.ZERO
 
 
-# Controle de movimentação suave da janela (Tween)
-var _tween_janela: Tween
-
-
 func mover_janela_suave(pos_destino: Vector2i, tamanho_destino: Vector2i = Vector2i.ZERO, duracao: float = 0.8) -> void:
-    """Desliza suavemente a janela da Gideon pela tela como um holograma flutuante."""
     var janela_id = DisplayServer.MAIN_WINDOW_ID
     var pos_atual = DisplayServer.window_get_position(janela_id)
     var tam_atual = DisplayServer.window_get_size(janela_id)
@@ -193,13 +362,11 @@ func mover_janela_suave(pos_destino: Vector2i, tamanho_destino: Vector2i = Vecto
         _tween_janela.kill()
 
     _tween_janela = create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-    
-    # Interpola a posição
+
     _tween_janela.tween_method(
         func(p: Vector2): DisplayServer.window_set_position(Vector2i(p), janela_id),
         Vector2(pos_atual), Vector2(pos_destino), duracao
     )
-    # Interpola o tamanho
     _tween_janela.tween_method(
         func(s: Vector2): DisplayServer.window_set_size(Vector2i(s), janela_id),
         Vector2(tam_atual), Vector2(tamanho_destino), duracao
