@@ -1,0 +1,80 @@
+// ============================================================================
+// GideonStarLabsHologram.ush — Shader HLSL para Material Master no Unreal Engine 5
+// Inspirado na Gideon da Sala do Tempo (Time Vault) do STAR Labs em The Flash.
+//
+// Principios visuais:
+// 1. Preserva 88%+ da definicao anatomica humana do MetaHuman (poros sutis,
+//    sombreamento de palpebras, filtro labial, estrutura nasal e olhar natural).
+// 2. Evita olhos artificialmente brancos/estourados ou aspecto de plastico azul:
+//    converte a luminancia de albedo + normal map + subsurface em projecao
+//    fotonica ciano/azul-clara com Fresnel controlado apenas nas bordas.
+// 3. Scanlines horizontais ultra-discretas (3% de modulacao) e dissolucao
+//    volumetrica suave na base do busto/pescoco.
+// ============================================================================
+
+struct FGideonHologramOutput
+{
+	float3 BaseColor;
+	float3 EmissiveColor;
+	float Opacity;
+};
+
+FGideonHologramOutput AvaliarHologramaStarLabs(
+	float3 AlbedoOriginal,
+	float3 NormalMundo,
+	float3 VetorCamera,
+	float3 PosicaoLocal,
+	float2 ScreenUV,
+	float Tempo,
+	float3 CorHolograma,
+	float3 CorFresnel,
+	float PreservarDefinicaoFacial,
+	float IntensidadeScanlines,
+	float OpacidadeGeral,
+	float ProgressoMaterializacao,
+	float AlturaCorteMin,
+	float AlturaCorteMax,
+	float AlturaTopoCabeca
+)
+{
+	FGideonHologramOutput Saida;
+
+	// 1. Luminancia perceptual da pele humana do MetaHuman (preserva feicoes reais)
+	float LuminanciaPele = dot(AlbedoOriginal, float3(0.299, 0.587, 0.114));
+	float ContrasteFacial = smoothstep(0.08, 0.92, LuminanciaPele);
+
+	// 2. Iluminacao direcional cinematografica de 3 pontos (Key + Fill + Rim)
+	float3 DirKey = normalize(float3(0.22, -0.88, 0.42));
+	float3 DirFill = normalize(float3(-0.45, -0.75, 0.25));
+	float NdotKey = saturate(dot(NormalMundo, -DirKey));
+	float NdotFill = saturate(dot(NormalMundo, -DirFill)) * 0.45;
+	float Sombreamento3D = lerp(0.48, 1.12, saturate(NdotKey + NdotFill));
+
+	// 3. Emissao luminosa suave nas bordas (Fresnel controlado para nao lavar o centro do rosto)
+	float NdotV = saturate(dot(NormalMundo, VetorCamera));
+	float FresnelBorda = pow(1.0 - NdotV, 3.4);
+
+	// 4. Paleta fotonica ciano / azul-clara fiel a serie The Flash
+	float3 SombraProfunda = float3(0.03, 0.26, 0.54);
+	float3 LuzCiano = CorHolograma;
+	float3 TomHumanoProjetado = lerp(SombraProfunda, LuzCiano, ContrasteFacial);
+	float3 PeleHolografica = lerp(CorHolograma * 0.72, TomHumanoProjetado, PreservarDefinicaoFacial) * Sombreamento3D;
+
+	// 5. Linhas de varredura (scanlines) extremamente discretas e microvariacao luminosa
+	float Scanline = sin(ScreenUV.y * 420.0 + Tempo * 1.15);
+	float FatorScanline = lerp(1.0 - IntensidadeScanlines, 1.0, (Scanline + 1.0) * 0.5);
+	float MicroPulso = 0.985 + 0.015 * sin(Tempo * 1.35 + PosicaoLocal.z * 0.08);
+
+	// 6. Dissolucao volumetrica na base do pescoco/busto e transicao de materializacao
+	float LimiteAltura = lerp(AlturaCorteMin - 4.0, AlturaTopoCabeca, ProgressoMaterializacao);
+	float FadeBase = smoothstep(AlturaCorteMin, AlturaCorteMax, PosicaoLocal.z);
+	float FadeTopo = 1.0 - smoothstep(LimiteAltura - 3.5, LimiteAltura + 1.0, PosicaoLocal.z);
+	float Visibilidade = saturate(FadeBase * FadeTopo * OpacidadeGeral);
+
+	float3 CorFinal = lerp(PeleHolografica, CorFresnel, FresnelBorda * 0.42) * FatorScanline * MicroPulso;
+
+	Saida.BaseColor = CorFinal * 0.65;
+	Saida.EmissiveColor = CorFinal * 0.42 + (CorFresnel * FresnelBorda * 0.28);
+	Saida.Opacity = Visibilidade;
+	return Saida;
+}

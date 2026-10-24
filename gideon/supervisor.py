@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DADOS_DIR = ROOT_DIR / "dados"
 AVATAR_DIR = ROOT_DIR / "gideon_avatar"
+UE5_DIR = ROOT_DIR / "gideon_ue5"
 RUNTIME_FILE = DADOS_DIR / "runtime.json"
 RESTART_FILE = DADOS_DIR / "reiniciar.solicitado"
 UPDATE_FILE = DADOS_DIR / "atualizar.solicitado"
@@ -148,8 +149,23 @@ def _backend_ativo(timeout: float = 0.4) -> bool:
         return False
 
 
+def _localizar_ue5() -> Path | None:
+    """Localiza o executavel empacotado do Unreal Engine 5 para o holograma da Gideon."""
+    configurado = os.environ.get("GIDEON_UE5_EXE")
+    candidatos = [
+        Path(configurado) if configurado else None,
+        UE5_DIR / "Build" / "Windows" / "GideonUE5.exe",
+        UE5_DIR / "Build" / "Windows" / "GideonUE5" / "Binaries" / "Win64" / "GideonUE5-Win64-Shipping.exe",
+        UE5_DIR / "Binaries" / "Win64" / "GideonUE5.exe",
+    ]
+    for candidato in candidatos:
+        if candidato and candidato.is_file():
+            return candidato
+    return None
+
+
 def _localizar_godot() -> tuple[Path | None, bool]:
-    """Retorna (executavel, exportado) para o avatar."""
+    """Retorna (executavel, exportado) para o avatar Godot (fallback preservado)."""
     configurado = os.environ.get("GIDEON_AVATAR_EXE")
     candidatos_exportados = [
         Path(configurado) if configurado else None,
@@ -167,6 +183,43 @@ def _localizar_godot() -> tuple[Path | None, bool]:
         reverse=True,
     )
     return (candidatos[0], False) if candidatos else (None, False)
+
+
+def localizar_renderizador_avatar(preferencia: str | None = None) -> tuple[str, list[str]]:
+    """Seleciona o motor grafico do avatar ('ue5' prioritario ou 'godot' para rollback/fallback).
+
+    Respeita a variavel de ambiente GIDEON_RENDERER ('ue5', 'godot' ou 'auto').
+    """
+    modo = (preferencia or os.environ.get("GIDEON_RENDERER", "auto")).strip().lower()
+
+    if modo in {"ue5", "unreal", "auto"}:
+        exe_ue5 = _localizar_ue5()
+        if exe_ue5:
+            return (
+                "ue5",
+                [
+                    str(exe_ue5),
+                    "-dx11",
+                    "-WINDOWED",
+                    "-ResX=450",
+                    "-ResY=650",
+                    "-NoSplash",
+                    "-NoVSync",
+                ],
+            )
+        if modo in {"ue5", "unreal"}:
+            raise FileNotFoundError(
+                "Executavel Unreal Engine 5 (GideonUE5.exe) ainda nao foi compilado em gideon_ue5/Build/Windows/."
+            )
+
+    executavel_godot, exportado = _localizar_godot()
+    if executavel_godot:
+        cmd = [str(executavel_godot)]
+        if not exportado:
+            cmd.extend(["--path", str(AVATAR_DIR)])
+        return ("godot", cmd)
+
+    raise FileNotFoundError("Nenhum renderizador de avatar (Unreal Engine 5 ou Godot) foi encontrado.")
 
 
 def _janelas_do_processo(pid: int) -> list[int]:
@@ -302,12 +355,7 @@ def executar() -> int:
         if not _backend_ativo():
             raise RuntimeError("O backend nao respondeu ao health check em 90 segundos.")
 
-        executavel_avatar, exportado = _localizar_godot()
-        if not executavel_avatar:
-            raise FileNotFoundError("Godot ou executavel exportado da Gideon nao encontrado.")
-        comando_avatar = [str(executavel_avatar)]
-        if not exportado:
-            comando_avatar.extend(["--path", str(AVATAR_DIR)])
+        motor_avatar, comando_avatar = localizar_renderizador_avatar()
         avatar = subprocess.Popen(
             comando_avatar,
             cwd=ROOT_DIR,
@@ -334,13 +382,14 @@ def executar() -> int:
                     "supervisor_pid": os.getpid(),
                     "backend_pid": backend.pid if backend else None,
                     "avatar_pid": avatar.pid,
+                    "motor_avatar": motor_avatar,
                     "iniciado_em": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
-        _log("Gideon iniciada sob supervisao.")
+        _log(f"Gideon iniciada sob supervisao (motor_avatar={motor_avatar}).")
 
         componente_falhou = False
         inicio_estavel = time.monotonic()
