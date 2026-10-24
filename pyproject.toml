@@ -1,20 +1,26 @@
 [project]
-name = "alfred"
-version = "0.1.0"
-description = "Add your description here"
+name = "gideon"
+version = "0.2.0"
+description = "Gideon — Assistente Pessoal com Interface Holográfica"
 readme = "README.md"
 authors = [
     { name = "tteuwxsw", email = "matheushenriqueal5@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.162.0",
     "google-genai>=2.33.0",
     "keyring>=25.7.0",
+    "uvicorn[standard]>=0.54.0",
+    "websockets>=15.0",
 ]
 
 [project.scripts]
-alfred = "alfred:main"
+gideon = "gideon:main"
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""

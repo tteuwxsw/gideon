@@ -1,0 +1,56 @@
+[gd_scene load_steps=7 format=3 uid="uid://c8yj3m5t2p1q4"]
+
+[ext_resource type="Script" path="res://scripts/avatar_controller.gd" id="1_controller"]
+[ext_resource type="Script" path="res://scripts/ws_client.gd" id="2_ws_client"]
+[ext_resource type="Shader" path="res://shaders/holograma.gdshader" id="3_shader"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_hologram"]
+render_priority = 0
+shader = ExtResource("3_shader")
+shader_parameter/cor_holograma = Color(0, 0.55, 1, 0.7)
+shader_parameter/cor_fresnel = Color(0.1, 0.95, 1, 1)
+shader_parameter/forca_fresnel = 2.5
+shader_parameter/densidade_scanlines = 140.0
+shader_parameter/velocidade_scanlines = 1.8
+shader_parameter/intensidade_scanlines = 0.25
+shader_parameter/velocidade_pulso = 1.2
+shader_parameter/intensidade_pulso = 0.08
+shader_parameter/opacidade_geral = 0.85
+
+[sub_resource type="SphereMesh" id="SphereMesh_head"]
+material = SubResource("ShaderMaterial_hologram")
+radius = 0.35
+height = 0.75
+
+[sub_resource type="Environment" id="Environment_glow"]
+background_mode = 0
+glow_enabled = true
+glow_levels/1 = 0.8
+glow_levels/2 = 0.6
+glow_intensity = 1.2
+glow_strength = 1.1
+glow_bloom = 0.3
+glow_blend_mode = 0
+
+[node name="GideonAvatar" type="Node3D" node_paths=PackedStringArray("ws_client", "mesh_avatar")]
+script = ExtResource("1_controller")
+ws_client = NodePath("WSClient")
+mesh_avatar = NodePath("AvatarMesh")
+
+[node name="WSClient" type="Node" parent="."]
+script = ExtResource("2_ws_client")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_glow")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1.4)
+current = true
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866025, -0.25, 0.433013, 0, 0.866025, 0.5, -0.5, -0.433013, 0.75, 1, 1.5, 2)
+light_color = Color(0.6, 0.9, 1, 1)
+light_energy = 0.8
+
+[node name="AvatarMesh" type="MeshInstance3D" parent="."]
+mesh = SubResource("SphereMesh_head")
