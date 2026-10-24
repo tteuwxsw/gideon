@@ -24,8 +24,10 @@ uniform float intensidade_distorcao : hint_range(0.0, 0.2) = 0.008;
 // Transparência controlada, materialização e dissolução suave no busto/ombros
 uniform float opacidade_geral : hint_range(0.0, 1.0) = 0.84;
 uniform float progresso_materializacao : hint_range(0.0, 1.0) = 1.0;
-uniform float corte_pescoco_min : hint_range(1.0, 1.7) = 1.25;
-uniform float corte_pescoco_max : hint_range(1.0, 1.7) = 1.44;
+// Limites em espaço de mundo (o rosto fica em torno de y=0; o topo da cabeça em ~+0.2)
+uniform float corte_pescoco_min : hint_range(-1.0, 1.0) = -0.30;
+uniform float corte_pescoco_max : hint_range(-1.0, 1.0) = -0.14;
+uniform float topo_cabeca : hint_range(-1.0, 1.0) = 0.32;
 
 varying float v_altura_local;
 varying vec3 v_pos_local;
@@ -37,7 +39,8 @@ float hash21(vec2 p) {
 }
 
 void vertex() {
-    v_altura_local = VERTEX.y;
+    // Altura em espaço de mundo: independe da escala/offset interno do GLB (Ready Player Me usa nós escalados)
+    v_altura_local = (MODEL_MATRIX * vec4(VERTEX, 1.0)).y;
     v_pos_local = VERTEX;
 
     // Micro-distorção eletrônica ocasional e extremamente sutil
@@ -90,7 +93,7 @@ void fragment() {
 
     // 8. Dissolução volumétrica no busto e animação de materialização
     float fade_busto = smoothstep(corte_pescoco_min, corte_pescoco_max, v_altura_local);
-    float limite_mat = mix(corte_pescoco_min - 0.05, 1.85, progresso_materializacao);
+    float limite_mat = mix(corte_pescoco_min - 0.05, topo_cabeca, progresso_materializacao);
     float fade_materializacao = 1.0 - smoothstep(limite_mat - 0.06, limite_mat + 0.02, v_altura_local);
     float borda_materializacao = smoothstep(limite_mat - 0.04, limite_mat, v_altura_local) * fade_materializacao;
     cor_final += cor_fresnel.rgb * borda_materializacao * 0.85;

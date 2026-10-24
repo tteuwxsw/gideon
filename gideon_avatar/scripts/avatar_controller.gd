@@ -37,7 +37,7 @@ var _fps_ocioso: int = 30
 var _timer_telemetria: float = 1.5
 
 # Controle de presença e customização no desktop
-var _opacidade_usuario: float = 0.86
+var _opacidade_usuario: float = 0.94
 var _escala_usuario: float = 1.0
 var _progresso_materializacao: float = 0.0
 var _alvo_materializacao: float = 1.0
@@ -127,6 +127,25 @@ func _ready() -> void:
         if ws_client.has_signal("config_holograma_recebida"):
             ws_client.config_holograma_recebida.connect(_on_config_holograma_recebida)
 
+    # Modo de diagnóstico visual: `godot --path gideon_avatar -- --captura`
+    if "--captura" in OS.get_cmdline_user_args():
+        _executar_captura_diagnostico()
+
+
+func _executar_captura_diagnostico() -> void:
+    Engine.max_fps = 60
+    await get_tree().create_timer(4.0).timeout
+    var img = get_viewport().get_texture().get_image()
+    var destino = ProjectSettings.globalize_path("res://../dados/captura_avatar.png")
+    img.save_png(destino)
+    print("[Diagnostico] captura=", destino)
+    print("[Diagnostico] fps=", Performance.get_monitor(Performance.TIME_FPS))
+    print("[Diagnostico] vram_mb=", snappedf(Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0, 0.1))
+    print("[Diagnostico] ram_estatica_mb=", snappedf(Performance.get_monitor(Performance.MEMORY_STATIC) / 1048576.0, 0.1))
+    print("[Diagnostico] draw_calls=", Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+    print("[Diagnostico] objetos=", Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
+    get_tree().quit()
+
 
 func _inicializar_tabelas_pesos() -> void:
     for nome in BLENDSHAPES_EXPRESSAO:
@@ -192,8 +211,8 @@ func _configurar_nos_modelo(no: Node) -> void:
 
     if no is MeshInstance3D:
         var nome_no = no.name
-        # Oculta apenas óculos e parte inferior; mantém cabeça, cabelo, olhos e topo do busto/ombros
-        if nome_no in ["Wolf3D_Glasses", "Wolf3D_Outfit_Bottom", "Wolf3D_Outfit_Footwear"]:
+        # Oculta óculos, roupa e parte inferior; o busto termina em fade volumétrico no pescoço/ombros
+        if nome_no in ["Wolf3D_Glasses", "Wolf3D_Outfit_Bottom", "Wolf3D_Outfit_Footwear", "Wolf3D_Outfit_Top"]:
             no.visible = false
         else:
             if nome_no not in ["EyeLeft", "EyeRight", "Wolf3D_Teeth"]:
@@ -226,16 +245,18 @@ func _aplicar_material_holografico(malha: MeshInstance3D) -> void:
         mat_holo.set_shader_parameter("intensidade_distorcao", 0.008)
         mat_holo.set_shader_parameter("opacidade_geral", _opacidade_usuario)
         mat_holo.set_shader_parameter("progresso_materializacao", _progresso_materializacao)
-        mat_holo.set_shader_parameter("corte_pescoco_min", 1.25)
-        mat_holo.set_shader_parameter("corte_pescoco_max", 1.44)
+        mat_holo.set_shader_parameter("corte_pescoco_min", -0.30)
+        mat_holo.set_shader_parameter("corte_pescoco_max", -0.14)
+        mat_holo.set_shader_parameter("topo_cabeca", 0.32)
 
         if mat_orig is BaseMaterial3D and mat_orig.albedo_texture:
             mat_holo.set_shader_parameter("textura_base", mat_orig.albedo_texture)
             if malha.name == "Wolf3D_Hair":
-                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.72)
-                mat_holo.set_shader_parameter("opacidade_geral", _opacidade_usuario * 0.88)
+                # Cabelo desenhado ANTES do rosto: a pele (quase opaca) cobre as mechas de trás
+                mat_holo.render_priority = -1
+                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.70)
             else:
-                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.82)
+                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.74)
 
         malha.set_surface_override_material(i, mat_holo)
         _materiais_holograma.append(mat_holo)
