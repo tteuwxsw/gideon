@@ -45,6 +45,8 @@ FRASES_PRE_AQUECIMENTO = (
     "Feito.",
     "Cancelado.",
     "Claro. O que gostaria de ouvir?",
+    "O que está acontecendo?",
+    "Quer que eu verifique o consumo de recursos?",
     "Pronto, Google Chrome aberto.",
     "Pronto, Bloco de Notas aberto.",
     "Abrindo o Chrome.",
@@ -258,6 +260,7 @@ class SintetizadorVoz:
             self.audio_barge_in = None
             self._falando = True
             t_inicio_tts = time.perf_counter()
+            self._notificar({"tipo": "estado_ia", "estado": "speaking"})
             self._notificar({"tipo": "fala_inicio", "texto": texto_limpo, "voz_id": self.voz_id})
 
             try:
@@ -268,7 +271,7 @@ class SintetizadorVoz:
                         self.ultima_latencia_ttfa_ms = (time.perf_counter() - t_inicio_tts) * 1000.0
                         self.ultimo_foi_cache = do_cache
                         if len(amostras) > 0:
-                            self._reproduzir_com_lipsync_real(amostras, taxa)
+                            self._reproduzir_com_lipsync_real(amostras, taxa, texto_falado=texto_limpo)
                         return not self.foi_interrompida
                     else:
                         # Para múltiplas sentenças, sintetiza a 1ª imediatamente e faz pré-busca das seguintes
@@ -284,6 +287,7 @@ class SintetizadorVoz:
                 self._falando = False
                 self.rms_saida_atual = 0.0
                 self._notificar({"tipo": "fala_fim"})
+                self._notificar({"tipo": "estado_ia", "estado": "idle"})
 
     def falar_stream(self, iterador_sentencas: Iterable[str]) -> bool:
         """Recebe sentenças em streaming do LLM e inicia a fala na 1ª sentença sem esperar o fim."""
@@ -294,6 +298,7 @@ class SintetizadorVoz:
             self._falando = True
             t_inicio = time.perf_counter()
             primeiro_audio_emitido = False
+            self._notificar({"tipo": "estado_ia", "estado": "speaking"})
             self._notificar({"tipo": "fala_inicio", "texto": "", "voz_id": self.voz_id})
 
             try:
@@ -309,32 +314,33 @@ class SintetizadorVoz:
                         self.ultimo_foi_cache = do_cache
                         primeiro_audio_emitido = True
                     if len(amostras) > 0 and not self._evento_interromper.is_set():
-                        self._reproduzir_com_lipsync_real(amostras, taxa)
+                        self._reproduzir_com_lipsync_real(amostras, taxa, texto_falado=s_limpa)
                 return not self.foi_interrompida
             finally:
                 self._falando = False
                 self.rms_saida_atual = 0.0
                 self._notificar({"tipo": "fala_fim"})
+                self._notificar({"tipo": "estado_ia", "estado": "idle"})
 
     def _falar_lista_sentencas_incremental(self, sentencas: list[str], t_inicio_tts: float) -> bool:
         """Sintetiza a Sentença 1 imediatamente e pré-carrega a Sentença N+1 enquanto a N toca."""
-        fila_audios: deque[ concurrent.futures.Future ] = deque()
         import concurrent.futures
 
+        fila_audios: deque[tuple[str, concurrent.futures.Future]] = deque()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             for s in sentencas:
-                fila_audios.append(pool.submit(self.sintetizar_para_memoria, s))
+                fila_audios.append((s, pool.submit(self.sintetizar_para_memoria, s)))
 
             primeira = True
             while fila_audios and not self._evento_interromper.is_set():
-                fut = fila_audios.popleft()
+                s_txt, fut = fila_audios.popleft()
                 amostras, taxa, do_cache = fut.result(timeout=12.0)
                 if primeira:
                     self.ultima_latencia_ttfa_ms = (time.perf_counter() - t_inicio_tts) * 1000.0
                     self.ultimo_foi_cache = do_cache
                     primeira = False
                 if len(amostras) > 0 and not self._evento_interromper.is_set():
-                    self._reproduzir_com_lipsync_real(amostras, taxa)
+                    self._reproduzir_com_lipsync_real(amostras, taxa, texto_falado=s_txt)
 
         return not self.foi_interrompida
 
@@ -375,15 +381,17 @@ class SintetizadorVoz:
             audio = audio[:, 0]
         return audio, taxa
 
-    def _reproduzir_com_lipsync_real(self, amostras: np.ndarray, taxa: int) -> None:
-        """Reproduz o áudio nos alto-falantes, envia RMS labial e monitora Barge-In do usuário."""
+    def _reproduzir_com_lipsync_real(self, amostras: np.ndarray, taxa: int, texto_falado: str = "") -> None:
+        """Reproduz o áudio nos alto-falantes, envia visemas fonéticos + RMS labial e monitora Barge-In."""
         import sounddevice as sd
+        from gideon.voz.visemas import converter_texto_em_sequencia_visemas, calcular_frame_lipsync_audio
 
         parar_labios = threading.Event()
-        passo_segundos = 0.033  # Atualiza a mandíbula ~30 vezes por segundo
+        passo_segundos = 0.033  # Atualiza os visemas e a mandíbula ~30 vezes por segundo
         tamanho_janela = max(1, int(taxa * passo_segundos))
         total_amostras = len(amostras)
         duracao_total = total_amostras / float(taxa)
+        sequencia_visemas = converter_texto_em_sequencia_visemas(texto_falado, duracao_total)
 
         def _loop_envelope_labial():
             inicio = time.perf_counter()
@@ -397,15 +405,20 @@ class SintetizadorVoz:
                 if len(fatia) > 0:
                     rms = float(np.sqrt(np.mean(np.square(fatia))))
                     self.rms_saida_atual = rms
-                    intensidade = min(1.0, max(0.0, (rms - 0.015) * 3.0))
                 else:
                     self.rms_saida_atual = 0.0
-                    intensidade = 0.0
+
+                quadro_lipsync = calcular_frame_lipsync_audio(
+                    fatia_pcm=fatia,
+                    taxa_amostragem=taxa,
+                    tempo_decorrido_s=decorrido,
+                    sequencia_visemas=sequencia_visemas,
+                )
 
                 self._notificar({
                     "tipo": "fala_chunk",
                     "texto": "",
-                    "intensidade": round(intensidade, 3),
+                    **quadro_lipsync,
                 })
                 time.sleep(passo_segundos)
 

@@ -54,6 +54,10 @@ def resposta_confirmacao(texto: str) -> bool | None:
         "pode",
         "pode fazer",
         "pode abrir",
+        "pode olhar",
+        "pode verificar",
+        "pode checar",
+        "pode ver",
         "pode continuar",
         "pode atualizar",
         "confirmado",
@@ -683,7 +687,52 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc"},
         }
 
-    # 15. Diagnóstico natural de lentidão
+    # 14.5. Diálogo proativo de diagnóstico ("Meu computador tá estranho hoje" -> "O que está acontecendo?" -> "Tá meio lento" -> "Quer que eu verifique o consumo de recursos?" -> "Pode olhar")
+    if ctx.get("aguardando_confirmacao_diagnostico"):
+        conf_diag = resposta_confirmacao(texto)
+        if conf_diag is True or re.search(r"\b(pode olhar|olha ai|ve ai|verifica|checa)\b", t_limpo):
+            return {
+                "acao": "obter_status_pc",
+                "parametros": {},
+                "foco_resposta": "diagnostico",
+                "novo_contexto": {
+                    "aguardando_confirmacao_diagnostico": False,
+                    "aguardando_sintoma_pc": False,
+                    "ultimo_topico": "hardware_pc",
+                    "ultimo_recurso": "geral",
+                },
+            }
+        if conf_diag is False:
+            return {
+                "acao": "nenhuma",
+                "resposta_direta": "[EMOCAO:neutra] Tudo bem, Henry. Qualquer coisa me avise.",
+                "novo_contexto": {"aguardando_confirmacao_diagnostico": False, "aguardando_sintoma_pc": False},
+            }
+
+    if re.search(r"\b(meu computador ta estranho|meu pc ta estranho|computador esta estranho|pc esquisito)\b", t_limpo):
+        return {
+            "acao": "perguntar_sintoma_pc",
+            "resposta_direta": "[EMOCAO:curiosidade] O que está acontecendo?",
+            "novo_contexto": {
+                "aguardando_sintoma_pc": True,
+                "ultimo_topico": "hardware_pc",
+            },
+        }
+
+    if (ctx.get("aguardando_sintoma_pc") and re.search(r"\b(lento|devagar|travando|engasgando|demorando|pesado)\b", t_limpo)) or (
+        t_limpo in {"ta meio lento", "esta meio lento", "ele ta meio lento", "ta lento"}
+    ):
+        return {
+            "acao": "oferecer_diagnostico_pc",
+            "resposta_direta": "[EMOCAO:preocupacao] Quer que eu verifique o consumo de recursos?",
+            "novo_contexto": {
+                "aguardando_sintoma_pc": False,
+                "aguardando_confirmacao_diagnostico": True,
+                "ultimo_topico": "hardware_pc",
+            },
+        }
+
+    # 15. Diagnóstico natural imediato de lentidão ("Por que meu computador tá travando?", "Você consegue ver o que está acontecendo?")
     if re.search(
         r"\b(por que meu computador ta travando|computador travando|pc lento|computador lento|o que esta acontecendo no pc|ve o que esta acontecendo)\b",
         t_limpo,
@@ -693,6 +742,17 @@ def interpretar_intencao_natural(
             "parametros": {},
             "foco_resposta": "diagnostico",
             "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "geral"},
+        }
+
+    # 15.5. Consciência de tela e janela ativa ("o que está na minha tela?", "qual janela está ativa?", "analisa minha tela")
+    if re.search(
+        r"\b(o que esta na minha tela|qual janela esta ativa|qual janela esta aberta|analisa minha tela|olha minha tela|o que estou vendo|janela atual)\b",
+        t_limpo,
+    ):
+        return {
+            "acao": "inspecionar_contexto_tela",
+            "parametros": {},
+            "novo_contexto": {"ultimo_topico": "tela"},
         }
 
     # 16. Telemetria contextual do PC (CPU, RAM, GPU / Placa de Vídeo, Disco)
@@ -765,15 +825,23 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "seguranca"},
         }
 
-    # 19. Modos visuais do holograma
+    # 19. Modos visuais e controles de presença do holograma no desktop
     if re.search(r"\b(modo foco|focar|centro da tela)\b", t_limpo):
         return {"acao": "modo_avatar", "parametros": {"modo": "foco"}, "novo_contexto": {}}
     if re.search(r"\b(modo compacto|ir para o canto|ficar pequena)\b", t_limpo):
         return {"acao": "modo_avatar", "parametros": {"modo": "compacto"}, "novo_contexto": {}}
-    if re.search(r"\b(modo conversa|aparecer|mostrar holograma)\b", t_limpo):
+    if re.search(r"\b(modo conversa|aparecer|mostrar holograma|materializar)\b", t_limpo):
         return {"acao": "modo_avatar", "parametros": {"modo": "conversa"}, "novo_contexto": {}}
-    if re.search(r"\b(ocultar holograma|esconder holograma|ficar invisivel)\b", t_limpo):
+    if re.search(r"\b(ocultar holograma|esconder holograma|ficar invisivel|desmaterializar)\b", t_limpo):
         return {"acao": "modo_avatar", "parametros": {"modo": "oculto"}, "novo_contexto": {}}
+    if re.search(r"\b(mais transparente|diminuir opacidade)\b", t_limpo):
+        return {"acao": "config_holograma", "parametros": {"opacidade_delta": -0.15}, "novo_contexto": {}}
+    if re.search(r"\b(menos transparente|mais nitida|aumentar opacidade)\b", t_limpo):
+        return {"acao": "config_holograma", "parametros": {"opacidade_delta": 0.15}, "novo_contexto": {}}
+    if re.search(r"\b(aumentar holograma|ficar maior)\b", t_limpo):
+        return {"acao": "config_holograma", "parametros": {"escala_delta": 0.15}, "novo_contexto": {}}
+    if re.search(r"\b(diminuir holograma|ficar menor)\b", t_limpo):
+        return {"acao": "config_holograma", "parametros": {"escala_delta": -0.15}, "novo_contexto": {}}
 
     return None
 

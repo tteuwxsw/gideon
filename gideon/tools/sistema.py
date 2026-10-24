@@ -224,6 +224,43 @@ def listar_janelas_visiveis() -> list[dict[str, Any]]:
     return janelas
 
 
+def inspecionar_contexto_tela() -> dict[str, Any]:
+    """Inspeciona a janela ativa e as janelas abertas na tela do Henry respeitando privacidade."""
+    from gideon.presenca import inspecionar_janela_ativa_segura, obter_posicao_cursor_normalizada
+
+    janela_ativa = inspecionar_janela_ativa_segura()
+    cursor = obter_posicao_cursor_normalizada()
+    janelas = listar_janelas_visiveis()
+    titulos_abertos = [
+        j["titulo"]
+        for j in janelas
+        if "godot" not in (j.get("processo") or "").lower()
+    ][:6]
+
+    titulo_principal = janela_ativa.get("titulo") or "Área de Trabalho"
+    proc_principal = janela_ativa.get("processo") or "explorer.exe"
+    if janela_ativa.get("protegida_privacidade"):
+        msg = "Vejo que você está em uma janela protegida por privacidade, Henry. Por segurança, não leio o conteúdo dela."
+    else:
+        outros = f" Além dela, estão abertas: {', '.join(titulos_abertos[1:4])}." if len(titulos_abertos) > 1 else ""
+        msg = f"No momento, a janela em foco na sua tela é '{titulo_principal}' ({proc_principal}).{outros}"
+
+    return {
+        "sucesso": True,
+        "verificado": True,
+        "janela_ativa": janela_ativa,
+        "cursor": cursor,
+        "janelas_visiveis": titulos_abertos,
+        "evidencias": {
+            "hwnd_ativo": janela_ativa.get("hwnd"),
+            "titulo_ativo": titulo_principal,
+            "processo_ativo": proc_principal,
+            "total_janelas_visiveis": len(janelas),
+        },
+        "mensagem_humana": msg,
+    }
+
+
 # Mapeamento rico de aplicativos do Windows 10: executáveis, processos, títulos e fallback web
 CATALOGO_APPS_WINDOWS: dict[str, dict[str, Any]] = {
     "chrome": {
@@ -1301,6 +1338,13 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.VERDE,
         executar=listar_janelas_visiveis,
         frase=lambda **kwargs: "listar as janelas visíveis no Windows",
+    ),
+    Ferramenta(
+        nome="inspecionar_contexto_tela",
+        descricao="Inspeciona qual janela e aplicativo estão em foco na tela do Henry no momento, respeitando privacidade.",
+        risco=Risco.VERDE,
+        executar=inspecionar_contexto_tela,
+        frase=lambda **kwargs: "analisar a janela ativa e o contexto atual da tela",
     ),
     Ferramenta(
         nome="abrir_programa",

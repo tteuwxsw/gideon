@@ -18,10 +18,11 @@ class TipoMensagem(str, Enum):
 
     Backend → Avatar:
         fala_inicio, fala_chunk, fala_fim, emocao, modo, olhar,
-        gesto, ouvindo, pensando, visibilidade, status
+        gesto, ouvindo, pensando, visibilidade, status,
+        estado_ia, atencao_desktop, config_holograma
 
     Avatar → Backend:
-        modo_mudou, clique_avatar, janela_moveu, pronto
+        modo_mudou, clique_avatar, janela_moveu, pronto, telemetria_avatar
     """
 
     # Backend → Avatar
@@ -36,12 +37,28 @@ class TipoMensagem(str, Enum):
     PENSANDO = "pensando"
     VISIBILIDADE = "visibilidade"
     STATUS = "status"
+    ESTADO_IA = "estado_ia"
+    ATENCAO_DESKTOP = "atencao_desktop"
+    CONFIG_HOLOGRAMA = "config_holograma"
 
     # Avatar → Backend
     MODO_MUDOU = "modo_mudou"
     CLIQUE_AVATAR = "clique_avatar"
     JANELA_MOVEU = "janela_moveu"
     PRONTO = "pronto"
+    TELEMETRIA_AVATAR = "telemetria_avatar"
+
+
+class EstadoComportamental(str, Enum):
+    """Sete estados comportamentais formais que sincronizam a inteligência da Gideon ao holograma."""
+
+    IDLE = "idle"
+    LISTENING = "listening"
+    THINKING = "thinking"
+    SPEAKING = "speaking"
+    EXECUTING = "executing"
+    OBSERVING = "observing"
+    ERROR = "error"
 
 
 class ModoAvatar(str, Enum):

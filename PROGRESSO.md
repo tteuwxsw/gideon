@@ -177,26 +177,23 @@ A Gideon pode parecer parte do Windows: iniciar com o login, não aparecer na ba
 
 ## 🔜 O que falta fazer
 
-### Fase 3 · Rosto 3D da Gideon + Integração Godot 4 (Protótipo Parcial)
-- [x] **Godot Engine 4.7.2** instalado no Windows via WinGet oficial
-- [x] **Projeto `gideon_avatar/` criado**:
-  - Shader holográfico GLSL com Fresnel e scanlines
-  - Cliente WebSocket e controlador de blendshapes
-  - Janela transparente sem bordas e intangível (`MOUSE_PASSTHROUGH = true`)
-  - Sistema de tween cúbico para movimentação suave na tela
-- [x] Remover a janela do Alt+Tab e da barra de tarefas com integração Win32 real
-- [ ] Validar renderização, shader, expressões e múltiplos monitores em teste visual reproduzível
-- [x] **Launchers de protótipo**:
-  - `iniciar_gideon.bat`: inicia uma única instância do supervisor
-  - `parar_gideon.bat`: solicita encerramento cooperativo somente dos processos pertencentes à Gideon
-  - `atualizar_gideon.bat`: agenda atualização com os componentes parados e reinício automático
-- [x] **Repositório Privado no GitHub**:
-  - Repositório `https://github.com/tteuwxsw/gideon` confirmado como privado
-  - Alterações da versão 0.3.0 ainda estão locais e não foram commitadas/publicadas nesta sessão
-  - `origin/master` configurado para atualizações contínuas
-- [x] **Auto-Atualização por Voz conectada**:
-  - Pedido e confirmação são reconhecidos de forma determinística; atualização roda fora do backend e reinicia o conjunto
-  - Falhas e árvore modificada são recusadas sem sobrescrever arquivos; falha pós-merge aciona restauração do commit anterior
+### Fase 3 · Rosto 3D da Gideon, Esqueleto Articulado, Lip-Sync Fonético e Consciência de Desktop (Concluída com Modelo Base 72-Blendshapes)
+- [x] **Godot Engine 4.7.2** integrado ao supervisor com janela transparente, sem bordas, intangível ao mouse (`MOUSE_PASSTHROUGH = true`) e oculta da barra de tarefas/Alt+Tab (`WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`)
+- [x] **Shader Holográfico Cinematográfico STAR Labs** (`gideon_avatar/shaders/holograma.gdshader`):
+  - Alta preservação das feições humanas (`preservar_detalhes_rosto = 0.82`), iluminação 3D de 3 pontos com brilho especular suave na pele e lábios, scanlines finas (`intensidade_scanlines = 0.045`), partículas luminosas discretas, dissolução volumétrica nos ombros e animação de materialização (`progresso_materializacao`)
+- [x] **Articulação Anatômica de `Skeleton3D` + 72 Blendshapes** (`gideon_avatar/scripts/avatar_controller.gd`):
+  - Articula 8 ossos reais do esqueleto (`Head`, `Neck`, `Spine2`, `Spine1`, `LeftShoulder`, `RightShoulder`, `LeftEye`, `RightEye`) para respiração orgânica nos ombros, inclinação distribuída pescoço/cabeça e micro-acenos durante a fala
+  - Interpolação contínua e suave (`lerp`) de todas as expressões faciais sem saltos bruscos
+- [x] **Lip-Sync Fonético Multi-Visema + Coarticulação Acústica** (`gideon/voz/visemas.py`, `gideon/voz/fala.py`):
+  - Mapeia fonemas e dígrafos do português para os **15 visemas Oculus** (`viseme_aa`, `viseme_E`, `viseme_I`, `viseme_O`, `viseme_U`, `viseme_PP`, `viseme_FF`, `viseme_SS`, `viseme_DD`, `viseme_CH`, `viseme_RR`, `viseme_kk`, `viseme_nn`, `viseme_TH`, `viseme_sil`) combinados com análise espectral (ZCR) e energia RMS da onda sonora real a 30 Hz
+- [x] **Máquina de 7 Estados Comportamentais** (`Idle`, `Listening`, `Thinking`, `Speaking`, `Executing`, `Observing`, `Error`) sincronizada em tempo real via WebSocket
+- [x] **Consciência do que Acontece no Computador** (`gideon/presenca.py`, `inspecionar_contexto_tela` em `gideon/tools/sistema.py`):
+  - Acompanhamento suave e limitado do cursor do mouse (`GetCursorPos`) sem capturas constantes de tela
+  - Detecção de abertura e troca de janelas (`GetForegroundWindow` + `GetWindowRect`) com proteção de privacidade (`PADROES_PRIVACIDADE_EXCLUIDOS`)
+  - Retorno imediato do olhar para o Henry (`(0, 0)`) ao iniciar conversa
+- [x] **Governador de Desempenho para AMD Radeon RX 580 8GB**:
+  - Ajuste automático de `Engine.max_fps` (`60 FPS` ativa/falando, `30 FPS` em repouso `Idle`, `10 FPS` quando oculta) e telemetria periódica em `GET /api/avatar/telemetria`
+- [x] **Bateria de Validação Visual e Comportamental** (`testes/teste_holograma_comportamento.py`): 5 suítes aprovadas (visemas fonéticos, consciência de desktop, diálogo proativo, carregamento de esqueleto/shader no Godot 4 e telemetria)
 
 ---
 

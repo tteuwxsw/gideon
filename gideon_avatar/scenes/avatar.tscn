@@ -7,18 +7,21 @@
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_hologram"]
 render_priority = 0
 shader = ExtResource("3_shader")
-shader_parameter/preservar_detalhes_rosto = 0.72
-shader_parameter/cor_holograma = Color(0.08, 0.68, 1, 0.92)
-shader_parameter/cor_fresnel = Color(0.35, 0.96, 1, 1)
-shader_parameter/forca_fresnel = 2.8
-shader_parameter/densidade_scanlines = 260.0
-shader_parameter/velocidade_scanlines = 1.4
-shader_parameter/intensidade_scanlines = 0.14
-shader_parameter/velocidade_pulso = 1.2
-shader_parameter/intensidade_pulso = 0.05
-shader_parameter/opacidade_geral = 0.94
-shader_parameter/corte_pescoco_min = 1.43
-shader_parameter/corte_pescoco_max = 1.49
+shader_parameter/preservar_detalhes_rosto = 0.82
+shader_parameter/cor_holograma = Color(0.10, 0.64, 0.96, 0.86)
+shader_parameter/cor_fresnel = Color(0.42, 0.95, 1, 1)
+shader_parameter/forca_fresnel = 3.2
+shader_parameter/densidade_scanlines = 340.0
+shader_parameter/velocidade_scanlines = 1.1
+shader_parameter/intensidade_scanlines = 0.045
+shader_parameter/velocidade_pulso = 1.1
+shader_parameter/intensidade_pulso = 0.022
+shader_parameter/intensidade_particulas = 0.06
+shader_parameter/intensidade_distorcao = 0.008
+shader_parameter/opacidade_geral = 0.84
+shader_parameter/progresso_materializacao = 1.0
+shader_parameter/corte_pescoco_min = 1.25
+shader_parameter/corte_pescoco_max = 1.44
 
 [sub_resource type="SphereMesh" id="SphereMesh_head"]
 material = SubResource("ShaderMaterial_hologram")
@@ -27,12 +30,15 @@ height = 0.25
 
 [sub_resource type="Environment" id="Environment_glow"]
 background_mode = 0
+ambient_light_source = 2
+ambient_light_color = Color(0.62, 0.88, 1.0, 1.0)
+ambient_light_energy = 0.55
 glow_enabled = false
-glow_levels/1 = 0.35
-glow_levels/2 = 0.2
-glow_intensity = 0.45
-glow_strength = 0.7
-glow_bloom = 0.04
+glow_levels/1 = 0.30
+glow_levels/2 = 0.18
+glow_intensity = 0.35
+glow_strength = 0.65
+glow_bloom = 0.03
 glow_blend_mode = 0
 
 [node name="GideonAvatar" type="Node3D" node_paths=PackedStringArray("ws_client", "mesh_avatar")]
@@ -47,14 +53,19 @@ script = ExtResource("2_ws_client")
 environment = SubResource("Environment_glow")
 
 [node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.015, 0.8)
-fov = 38.0
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.02, 0.84)
+fov = 36.0
 current = true
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.866025, -0.25, 0.433013, 0, 0.866025, 0.5, -0.5, -0.433013, 0.75, 1, 1.5, 2)
-light_color = Color(0.6, 0.9, 1, 1)
-light_energy = 0.8
+[node name="KeyLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.92, -0.18, 0.35, 0, 0.89, 0.45, -0.39, -0.41, 0.82, 0.8, 1.2, 1.8)
+light_color = Color(0.82, 0.95, 1.0, 1.0)
+light_energy = 0.95
+
+[node name="FillLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.85, 0.22, -0.48, 0, 0.91, 0.42, 0.53, -0.36, 0.77, -1.0, 0.8, 1.5)
+light_color = Color(0.35, 0.80, 1.0, 1.0)
+light_energy = 0.42
 
 [node name="AvatarMesh" type="MeshInstance3D" parent="."]
 mesh = SubResource("SphereMesh_head")

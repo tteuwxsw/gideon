@@ -121,6 +121,30 @@ class ModoRequisicao(BaseModel):
     modo: str
 
 
+class ConfigHologramaRequisicao(BaseModel):
+    estado_ia: str | None = None
+    opacidade: float | None = None
+    escala: float | None = None
+    click_through: bool | None = None
+    sempre_visivel: bool | None = None
+    qualidade: str | None = None
+    fps_ativo: int | None = None
+    fps_ocioso: int | None = None
+    posicao_x: int | None = None
+    posicao_y: int | None = None
+
+
+_telemetria_avatar_atual: dict = {
+    "fps": 60,
+    "estado_ia": "idle",
+    "emocao": "neutra",
+    "visema_ativo": "viseme_sil",
+    "olhar_x": 0.0,
+    "olhar_y": 0.0,
+    "modo": "conversa",
+}
+
+
 # ─── Rotas HTTP ───────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -415,6 +439,30 @@ async def definir_modo(req: ModoRequisicao, _: bool = Depends(autenticar)):
     return {"status": "ok"}
 
 
+@app.post("/api/avatar/config")
+async def configurar_holograma(req: ConfigHologramaRequisicao, _: bool = Depends(autenticar)):
+    """Configura presença do holograma no desktop (opacidade, escala, posição, click-through, FPS e estado_ia)."""
+    payload = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "estado_ia" in payload:
+        await broadcast_ws({"tipo": "estado_ia", "estado": payload["estado_ia"]})
+    await broadcast_ws({"tipo": "config_holograma", **payload})
+    return {"status": "ok", "config_enviada": payload}
+
+
+@app.get("/api/avatar/telemetria")
+async def obter_telemetria_avatar(_: bool = Depends(autenticar)):
+    """Retorna a telemetria visual em tempo real do avatar Godot (FPS, estado comportamental, olhar, visema)."""
+    from gideon.presenca import inspecionar_janela_ativa_segura, obter_posicao_cursor_normalizada
+    return {
+        "status": "ok",
+        "avatar": _telemetria_avatar_atual,
+        "consciencia_desktop": {
+            "cursor": obter_posicao_cursor_normalizada(),
+            "janela_ativa": inspecionar_janela_ativa_segura(),
+        },
+    }
+
+
 # ─── WebSocket para o Avatar ──────────────────────────────────
 
 @app.websocket("/ws")
@@ -465,7 +513,13 @@ async def websocket_avatar(websocket: WebSocket):
 
                 elif tipo == "modo_mudou":
                     modo = mensagem.get("modo", "")
+                    _telemetria_avatar_atual["modo"] = modo
                     print(f"  [WebSocket] Modo do avatar: {modo}")
+
+                elif tipo == "telemetria_avatar":
+                    for k in ("fps", "estado_ia", "emocao", "visema_ativo", "olhar_x", "olhar_y", "modo"):
+                        if k in mensagem:
+                            _telemetria_avatar_atual[k] = mensagem[k]
 
                 # Outros eventos do avatar são logados
                 else:

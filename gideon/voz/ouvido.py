@@ -269,6 +269,7 @@ class OuvinteVoz:
                     if energia > limiar_dinamico:
                         if not falando:
                             falando = True
+                            self._notificar({"tipo": "estado_ia", "estado": "listening"})
                             self._notificar({"tipo": "ouvindo", "ativo": True})
                             buffer_audio.extend(pre_buffer)
                             pre_buffer.clear()

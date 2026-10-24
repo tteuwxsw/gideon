@@ -13,6 +13,7 @@ import numpy as np
 from gideon.cerebro import Cerebro
 from gideon.executor import EstadoExecucao, ExecutorConfiavel, ResultadoExecucao
 from gideon.memoria import Memoria
+from gideon.presenca import MonitorPresencaDesktop
 from gideon.protocolo import limpar_emocoes_texto, extrair_emocoes_texto
 from gideon.tools import obter_catalogo_ferramentas
 from gideon.voz.comandos import (
@@ -53,6 +54,8 @@ class OrquestradorVoz:
         self.callback_ws = callback_ws
         self.ouvinte = OuvinteVoz(callback_evento=self._evento_interno)
         self.sintetizador = SintetizadorVoz(callback_evento=self._evento_interno)
+        self.monitor_presenca = MonitorPresencaDesktop(callback_evento=self._evento_interno)
+        self.estado_comportamental_atual: str = "idle"
 
         self.ativo = False
         self.modo_escuta: ModoEscuta = ModoEscuta.ATIVACAO_POR_NOME
@@ -147,21 +150,32 @@ class OrquestradorVoz:
             except Exception:
                 pass
 
+    def _definir_estado_ia(self, estado: str) -> None:
+        self.estado_comportamental_atual = estado
+        self._evento_interno({"tipo": "estado_ia", "estado": estado})
+        monitor = getattr(self, "monitor_presenca", None)
+        if monitor is not None:
+            monitor.definir_foco_conversa(estado in {"listening", "thinking", "speaking"})
+
     def iniciar(self) -> None:
-        """Inicia a escuta em segundo plano."""
+        """Inicia a escuta e o sensor de presença de desktop em segundo plano."""
         if self.ativo:
             return
         self.ativo = True
         self._parar_evento.clear()
+        if hasattr(self, "monitor_presenca") and self.monitor_presenca:
+            self.monitor_presenca.iniciar()
         self._thread_loop = threading.Thread(target=self._loop_principal, daemon=True)
         self._thread_loop.start()
-        print("  [Gideon Voz] Orquestrador de voz mãos-livres ATIVADO.")
+        print("  [Gideon Voz] Orquestrador de voz mãos-livres e consciência de desktop ATIVADOS.")
 
     def parar(self) -> None:
         """Encerra a escuta em segundo plano e interrompe qualquer fala ativa."""
         self.ativo = False
         self._parar_evento.set()
         self.sintetizador.interromper()
+        if hasattr(self, "monitor_presenca") and self.monitor_presenca:
+            self.monitor_presenca.parar()
         if self._thread_loop:
             self._thread_loop.join(timeout=1.0)
         print("  [Gideon Voz] Orquestrador de voz DESATIVADO.")
@@ -194,10 +208,21 @@ class OrquestradorVoz:
             self._evento_interno({"tipo": "modo", "nome": modo_av})
             return "[EMOCAO:amigavel] Feito."
 
+        if acao == "config_holograma":
+            self._evento_interno({"tipo": "config_holograma", **params})
+            return "[EMOCAO:amigavel] Ajustei a projeção holográfica."
+
+        # Define estado comportamental antes de executar a ferramenta
+        if acao == "inspecionar_contexto_tela":
+            self._definir_estado_ia("observing")
+        else:
+            self._definir_estado_ia("executing")
+
         # Se for uma ação que abre janela/processo e estivermos no loop de voz real, dá feedback curto antes de verificar
         if falar_feedback_imediato and acao in {"abrir_programa", "pesquisar_navegador", "abrir_pasta"}:
             self._evento_interno({"tipo": "pensando", "ativo": False})
             self.sintetizador.falar("Abrindo.")
+            self._definir_estado_ia("executing")
 
         executor = self._obter_executor()
         res = executor.executar(acao, params, auto_amarelo=True)
@@ -205,6 +230,7 @@ class OrquestradorVoz:
 
         # Se a execução falhou ou não foi verificada, NUNCA confirma sucesso!
         if res.estado != EstadoExecucao.SUCCESS or not res.verificado:
+            self._definir_estado_ia("error")
             if res.sugestao_recuperacao and res.alternativa_recuperacao:
                 self._confirmacao_pendente = res.alternativa_recuperacao.get("acao")
                 self._parametros_pendentes = dict(res.alternativa_recuperacao.get("parametros") or {})
@@ -336,7 +362,7 @@ class OrquestradorVoz:
                 self.ultimo_llm_ttft_ms = 0.0
                 return resp_plano
 
-            if acao == "modo_avatar" or acao in self._catalogo._ferramentas:
+            if acao in {"modo_avatar", "config_holograma"} or acao in self._catalogo._ferramentas:
                 resp_tool = self._executar_intencao_verificada(
                     intencao,
                     falar_feedback_imediato=falar_feedback_imediato,
