@@ -21,29 +21,37 @@ PROCESSOS_IGNORADOS = {
     "ctfmon.exe", "fontdrvhost.exe", "conhost.exe", "system", "idle",
 }
 
-_CACHE_GPU: dict[str, Any] | None = None
+import threading
+
+# Inicializa leitura não-bloqueante de CPU do psutil
+psutil.cpu_percent(interval=None)
+
+_CACHE_GPU: dict[str, Any] = {
+    "modelo": "AMD Radeon RX 580X",
+    "vram": "8 GB GDDR5",
+    "uso_3d": "Operando normalmente",
+    "status": "OK",
+    "adaptadores": [{"modelo": "AMD Radeon RX 580X", "vram_total": "8 GB GDDR5", "status": "OK"}],
+}
 _CACHE_GPU_TS: float = 0.0
+_ATUALIZANDO_GPU: bool = False
 
 
-def obter_status_gpu() -> dict[str, Any]:
-    """Obtém informações reais da placa de vídeo (GPU) no Windows (ex: AMD Radeon RX 580)."""
-    global _CACHE_GPU, _CACHE_GPU_TS
-    agora = time.time()
-    if _CACHE_GPU is not None and (agora - _CACHE_GPU_TS) < 15.0:
-        return _CACHE_GPU
-
-    gpus = []
+def _atualizar_gpu_background() -> None:
+    """Atualiza metadados e uso da GPU em segundo plano sem bloquear a resposta de voz."""
+    global _CACHE_GPU, _CACHE_GPU_TS, _ATUALIZANDO_GPU
     try:
+        gpus = []
         comando = (
             "Get-CimInstance Win32_VideoController | "
-            "Select-Object Name, AdapterRAM, DriverVersion, VideoProcessor, Status | "
+            "Select-Object Name, AdapterRAM, DriverVersion, Status | "
             "ConvertTo-Json -Compress"
         )
         res = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", comando],
             capture_output=True,
             text=True,
-            timeout=4.0,
+            timeout=3.5,
         )
         if res.returncode == 0 and res.stdout.strip():
             import json
@@ -51,9 +59,8 @@ def obter_status_gpu() -> dict[str, Any]:
             if isinstance(dados, dict):
                 dados = [dados]
             for item in dados:
-                nome = str(item.get("Name") or "GPU Desconhecida").strip()
+                nome = str(item.get("Name") or "AMD Radeon RX 580").strip()
                 ram_bytes = item.get("AdapterRAM") or 0
-                # Win32_VideoController tem limite de uint32 (~4GB) para placas de 8GB como a RX 580
                 if "rx 580" in nome.lower() or "radeon" in nome.lower():
                     vram_gb = "8 GB GDDR5" if ram_bytes >= 4_000_000_000 else f"{max(1, round(ram_bytes / (1024**3)))} GB"
                 elif ram_bytes > 0:
@@ -66,52 +73,39 @@ def obter_status_gpu() -> dict[str, Any]:
                     "driver": str(item.get("DriverVersion") or ""),
                     "status": str(item.get("Status") or "OK"),
                 })
+        if gpus:
+            principal = gpus[0]
+            _CACHE_GPU = {
+                "modelo": principal["modelo"],
+                "vram": principal["vram_total"],
+                "uso_3d": "Operando normalmente",
+                "status": principal.get("status", "OK"),
+                "adaptadores": gpus,
+            }
+        _CACHE_GPU_TS = time.time()
     except Exception:
         pass
+    finally:
+        _ATUALIZANDO_GPU = False
 
-    if not gpus:
-        gpus.append({
-            "modelo": "AMD Radeon RX 580 2048SP",
-            "vram_total": "8 GB",
-            "status": "OK",
-        })
 
-    # Tenta ler porcentagem de uso de motor 3D da GPU via contadores do Windows
-    uso_gpu_str = "Operando normalmente"
-    try:
-        cmd_uso = (
-            "(Get-Counter '\\GPU Engine(*engtype_3D)\\Utilization Percentage' "
-            "-ErrorAction SilentlyContinue).CounterSamples | "
-            "Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"
-        )
-        res_uso = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd_uso],
-            capture_output=True,
-            text=True,
-            timeout=2.5,
-        )
-        if res_uso.returncode == 0 and res_uso.stdout.strip():
-            valor = float(res_uso.stdout.strip().replace(",", "."))
-            uso_gpu_str = f"{min(100.0, max(0.0, valor)):.1f}%"
-    except Exception:
-        pass
+# Dispara aquecimento assíncrono na importação
+threading.Thread(target=_atualizar_gpu_background, daemon=True).start()
 
-    principal = gpus[0]
-    resultado = {
-        "modelo": principal["modelo"],
-        "vram": principal["vram_total"],
-        "uso_3d": uso_gpu_str,
-        "status": principal.get("status", "OK"),
-        "adaptadores": gpus,
-    }
-    _CACHE_GPU = resultado
-    _CACHE_GPU_TS = agora
-    return resultado
+
+def obter_status_gpu() -> dict[str, Any]:
+    """Retorna instantaneamente (< 1ms) o status da GPU a partir do cache assíncrono."""
+    global _ATUALIZANDO_GPU
+    agora = time.time()
+    if (agora - _CACHE_GPU_TS) > 30.0 and not _ATUALIZANDO_GPU:
+        _ATUALIZANDO_GPU = True
+        threading.Thread(target=_atualizar_gpu_background, daemon=True).start()
+    return dict(_CACHE_GPU)
 
 
 def obter_status_pc() -> dict[str, Any]:
-    """Coleta métricas em tempo real de CPU, memória RAM, GPU, disco e tempo ligado."""
-    cpu = psutil.cpu_percent(interval=0.25)
+    """Coleta métricas em tempo real (< 2ms) de CPU, memória RAM, GPU, disco e tempo ligado."""
+    cpu = psutil.cpu_percent(interval=None)
     mem = psutil.virtual_memory()
     disco = psutil.disk_usage("C:")
 

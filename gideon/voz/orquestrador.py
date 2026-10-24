@@ -1,11 +1,12 @@
-"""Orquestrador inteligente de voz da Gideon: Wake Word, 3 Modos de Escuta, Barge-In e Contexto."""
+"""Orquestrador de baixa latência da Gideon: Streaming LLM->TTS, 3 Modos, Barge-In e Telemetria."""
 
 from __future__ import annotations
 
 from enum import Enum
+import re
 import threading
 import time
-from typing import Callable, Any
+from typing import Callable, Any, Generator
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from gideon.memoria import Memoria
 from gideon.protocolo import limpar_emocoes_texto, extrair_emocoes_texto
 from gideon.tools import obter_catalogo_ferramentas
 from gideon.voz.comandos import (
+    avaliar_fala_direcionada,
     detectar_comando_sistema,
     detectar_mudanca_modo_escuta,
     eh_encerramento_conversa,
@@ -23,8 +25,9 @@ from gideon.voz.comandos import (
     normalizar,
     resposta_confirmacao,
 )
-from gideon.voz.ouvido import OuvinteVoz
 from gideon.voz.fala import SintetizadorVoz
+from gideon.voz.metricas import metricas_voz_global
+from gideon.voz.ouvido import OuvinteVoz
 
 
 class ModoEscuta(str, Enum):
@@ -32,11 +35,11 @@ class ModoEscuta(str, Enum):
 
     ATIVACAO_POR_NOME = "ativacao_por_nome"   # Modo 1: Aguarda "Gideon" e abre sessão
     CONVERSA_CONTINUA = "conversa_continua"   # Modo 2: Mantém sessão ativa sem repetir o nome
-    CONVERSA_LIVRE = "conversa_livre"         # Modo 3: Escuta livre sem exigir palavra de ativação
+    CONVERSA_LIVRE = "conversa_livre"         # Modo 3: Escuta livre direcionada sem exigir wake word
 
 
 class OrquestradorVoz:
-    """Controla o ciclo completo: Microfone -> VAD -> Wake Word -> IA/Contexto -> Ação -> TTS com Barge-In."""
+    """Controla o pipeline de baixa latência: Microfone -> VAD -> STT -> NLU/LLM Stream -> TTS -> Áudio."""
 
     def __init__(
         self,
@@ -52,7 +55,7 @@ class OrquestradorVoz:
 
         self.ativo = False
         self.modo_escuta: ModoEscuta = ModoEscuta.ATIVACAO_POR_NOME
-        self.duracao_sessao: float = 25.0  # Segundos de janela de conversação contínua
+        self.duracao_sessao: float = 30.0  # Janela de conversação contínua
 
         self._thread_loop: threading.Thread | None = None
         self._parar_evento = threading.Event()
@@ -64,16 +67,22 @@ class OrquestradorVoz:
         self._parametros_pendentes: dict[str, Any] = {}
         self._confirmacao_expira_em = 0.0
 
-        # Histórico contextual da sessão de voz (mantém as últimas trocas para referências como "E a placa de vídeo?")
+        # Memória de curta duração enxuta (últimos 6 turnos = 12 mensagens)
         self.historico_sessao: list[dict[str, str]] = []
         self.contexto_conversa: dict[str, Any] = {}
 
+        # Métricas do último turno
+        self.ultima_origem_resposta: str = "comando_local"
+        self.ultimo_nlu_ms: float = 0.0
+        self.ultimo_llm_ttft_ms: float = 0.0
+
     def obter_configuracao(self) -> dict[str, Any]:
-        """Retorna o estado e as configurações atuais do subsistema de voz."""
+        """Retorna estado, configurações e resumo de métricas p50/p95."""
         agora = time.time()
         sessao_ativa = self._em_conversa_ativa and (agora - self._ultimo_contato) < self.duracao_sessao
         return {
             "ativa": self.ativo,
+            "voz_fixa_id": self.sintetizador.voz_id,
             "modo_escuta": self.modo_escuta.value,
             "sessao_conversa_ativa": sessao_ativa or self.modo_escuta == ModoEscuta.CONVERSA_LIVRE,
             "duracao_sessao_segundos": self.duracao_sessao,
@@ -81,6 +90,7 @@ class OrquestradorVoz:
             "barge_in_ativo": self.sintetizador.barge_in_ativo,
             "falando": self.sintetizador.falando,
             "contexto_atual": self.contexto_conversa.get("ultimo_topico", "geral"),
+            "metricas_latencia": metricas_voz_global.resumo_estatistico(),
         }
 
     def configurar(
@@ -118,7 +128,6 @@ class OrquestradorVoz:
         return self.sintetizador.interromper()
 
     def _evento_interno(self, evento: dict) -> None:
-        """Repassa eventos do ouvido/fala para o avatar WebSocket."""
         if self.callback_ws:
             try:
                 self.callback_ws(evento)
@@ -145,11 +154,11 @@ class OrquestradorVoz:
         print("  [Gideon Voz] Orquestrador de voz DESATIVADO.")
 
     def _registrar_turno_sessao(self, pergunta: str, resposta_limpa: str) -> None:
-        """Mantém histórico recente para referências contextuais ('E a placa de vídeo?', 'Me explica melhor')."""
+        """Mantém histórico curto enxuto (últimas 12 mensagens) para não inflar o prompt."""
         self.historico_sessao.append({"role": "user", "content": pergunta})
         self.historico_sessao.append({"role": "assistant", "content": resposta_limpa})
-        if len(self.historico_sessao) > 16:
-            self.historico_sessao = self.historico_sessao[-16:]
+        if len(self.historico_sessao) > 12:
+            self.historico_sessao = self.historico_sessao[-12:]
 
     def _emitir_emocoes_e_limpar(self, texto: str) -> str:
         emocoes = extrair_emocoes_texto(texto)
@@ -157,18 +166,27 @@ class OrquestradorVoz:
             self._evento_interno({"tipo": "emocao", "nome": emo, "intensidade": 0.8})
         return limpar_emocoes_texto(texto)
 
-    def processar_fala_usuario(self, comando: str) -> str:
-        """Processa uma frase já ativada do usuário e retorna a resposta (com tags de emoção)."""
+    def processar_fala_local_rapida(self, comando: str) -> str | None:
+        """Tenta resolver a solicitação localmente em < 5ms sem precisar chamar o LLM."""
+        t0 = time.perf_counter()
         comando_limpo = comando.strip()
 
         # 0. Chamado de presença ("Gideon" ou "Gideon, você está aí?")
         if not comando_limpo or comando_limpo == "__PRESENCA__":
-            return "[EMOCAO:amigavel] Estou aqui, Henry. Como posso ajudar você?"
+            self.ultima_origem_resposta = "cache_instantaneo"
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            self.ultimo_llm_ttft_ms = 0.0
+            return "[EMOCAO:amigavel] Estou aqui, Henry."
 
         # 1. Interrupção explícita ("Gideon, espera", "Para", "Silêncio")
         cmd_norm = normalizar(comando_limpo)
-        if cmd_norm in {"espera", "espere", "para", "pare", "silencio", "calma", "aguarda", "pausa"}:
-            return "[EMOCAO:neutra] Pois não, Henry. Estou ouvindo."
+        if cmd_norm in {"espera", "espere", "para", "pare", "silencio", "calma", "aguarda", "pausa"} or (
+            len(cmd_norm.split()) <= 2 and eh_interrupcao_barge_in(comando_limpo)
+        ):
+            self.ultima_origem_resposta = "cache_instantaneo"
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            self.ultimo_llm_ttft_ms = 0.0
+            return "[EMOCAO:neutra] Tudo bem."
 
         # 2. Mudança de modo de escuta por voz
         novo_modo = detectar_mudanca_modo_escuta(comando_limpo)
@@ -177,22 +195,31 @@ class OrquestradorVoz:
             nomes_amigaveis = {
                 "ativacao_por_nome": "ativação por nome",
                 "conversa_continua": "conversação contínua",
-                "conversa_livre": "conversação livre sem palavra de ativação",
+                "conversa_livre": "conversação livre",
             }
-            return f"[EMOCAO:amigavel] Modo de {nomes_amigaveis.get(novo_modo, novo_modo)} ativado, Henry."
+            self.ultima_origem_resposta = "comando_local"
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            self.ultimo_llm_ttft_ms = 0.0
+            return f"[EMOCAO:amigavel] Modo de {nomes_amigaveis.get(novo_modo, novo_modo)} ativado."
 
-        # 3. Encerramento educado da sessão de conversa ("Obrigado, só isso", "Pode descansar")
+        # 3. Encerramento educado da sessão de conversa
         if eh_encerramento_conversa(comando_limpo):
             self._em_conversa_ativa = False
             if self.modo_escuta == ModoEscuta.CONVERSA_LIVRE:
                 self.modo_escuta = ModoEscuta.ATIVACAO_POR_NOME
             self._evento_interno({"tipo": "modo", "nome": "compacto"})
-            return "[EMOCAO:amigavel] Sempre às ordens, Henry. Estarei aqui se precisar."
+            self.ultima_origem_resposta = "cache_instantaneo"
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            self.ultimo_llm_ttft_ms = 0.0
+            return "[EMOCAO:amigavel] Tudo bem."
 
         # 4. Confirmações pendentes ou comandos críticos de sistema (Portão Vermelho)
         resposta_sistema = self._processar_comando_sistema(comando_limpo)
         if resposta_sistema:
             self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resposta_sistema))
+            self.ultima_origem_resposta = "comando_local"
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            self.ultimo_llm_ttft_ms = 0.0
             return resposta_sistema
 
         # 5. Comandos diretos de memória permanente ("lembra que...", "o que você sabe sobre mim?")
@@ -201,9 +228,12 @@ class OrquestradorVoz:
             self.memoria.gravar_mensagem("voce", comando_limpo)
             self.memoria.gravar_mensagem("assistente", resp_memoria)
             self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_memoria))
+            self.ultima_origem_resposta = "memoria_local"
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            self.ultimo_llm_ttft_ms = 0.0
             return resp_memoria
 
-        # 6. Interpretador de Intenções Naturais (abrir apps/sites, colocar músicas, consultar RAM/GPU/CPU)
+        # 6. Interpretador de Intenções Naturais (respostas curtas e humanas para comandos simples!)
         intencao = interpretar_intencao_natural(comando_limpo, self.contexto_conversa)
         if intencao is not None:
             if "novo_contexto" in intencao:
@@ -212,6 +242,9 @@ class OrquestradorVoz:
             if intencao.get("resposta_direta"):
                 resp_dir = intencao["resposta_direta"]
                 self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_dir))
+                self.ultima_origem_resposta = "cache_instantaneo"
+                self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+                self.ultimo_llm_ttft_ms = 0.0
                 return resp_dir
 
             acao = intencao.get("acao", "")
@@ -220,58 +253,152 @@ class OrquestradorVoz:
             if acao == "modo_avatar":
                 modo_av = params.get("modo", "conversa")
                 self._evento_interno({"tipo": "modo", "nome": modo_av})
-                resp_modo = f"[EMOCAO:amigavel] Ajustando minha projeção para o modo {modo_av}, Henry."
+                resp_modo = "[EMOCAO:amigavel] Feito."
                 self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_modo))
+                self.ultima_origem_resposta = "cache_instantaneo"
+                self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+                self.ultimo_llm_ttft_ms = 0.0
                 return resp_modo
 
             if acao in self._catalogo._ferramentas:
-                resultado = self._catalogo.executar(acao, params, auto_amarelo=True)
-                if resultado.get("ok"):
+                # Para abrir programas ou tocar mídia, responde "Abrindo." imediatamente e executa
+                if acao == "abrir_programa":
+                    threading.Thread(
+                        target=lambda: self._catalogo.executar(acao, params, auto_amarelo=True),
+                        daemon=True,
+                    ).start()
+                    resp_tool = "[EMOCAO:amigavel] Abrindo."
+                else:
+                    resultado = self._catalogo.executar(acao, params, auto_amarelo=True)
                     saida = resultado.get("saida")
                     if acao in ("obter_status_pc", "obter_status_gpu") and isinstance(saida, dict):
                         foco = intencao.get("foco_resposta", "geral")
                         resp_tool = formatar_resposta_telemetria(saida, foco=foco)
                     elif acao == "listar_programas_usuario" and isinstance(saida, list):
-                        principais = ", ".join(saida[:10]) if saida else "nenhum aplicativo principal"
-                        resp_tool = f"[EMOCAO:concentracao] No momento, os principais programas abertos são: {principais}."
-                    elif acao == "abrir_programa":
-                        nome_app = params.get("nome", "solicitado")
-                        resp_tool = f"[EMOCAO:amigavel] Abrindo {nome_app}, Henry."
+                        principais = ", ".join(saida[:8]) if saida else "nenhum aplicativo principal"
+                        resp_tool = f"[EMOCAO:concentracao] Estão abertos: {principais}."
                     elif acao == "tocar_ou_pesquisar_midia":
                         consulta = params.get("consulta", "")
-                        plat = params.get("plataforma", "Spotify").capitalize()
-                        resp_tool = f"[EMOCAO:amigavel] Colocando {consulta} no {plat} para você, Henry."
+                        resp_tool = f"[EMOCAO:amigavel] Colocando {consulta}."
+                    elif acao == "controlar_midia":
+                        resp_tool = "[EMOCAO:amigavel] Feito."
                     else:
                         resp_tool = f"[EMOCAO:amigavel] {saida}"
 
-                    self.memoria.gravar_mensagem("voce", comando_limpo)
-                    self.memoria.gravar_mensagem("assistente", resp_tool)
-                    self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_tool))
-                    return resp_tool
+                self.memoria.gravar_mensagem("voce", comando_limpo)
+                self.memoria.gravar_mensagem("assistente", resp_tool)
+                self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resp_tool))
+                self.ultima_origem_resposta = "comando_local"
+                self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+                self.ultimo_llm_ttft_ms = 0.0
+                return resp_tool
 
-        # 7. Consulta contextual ao Cérebro (Gemini) com histórico completo da sessão
+        self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+        return None
+
+    def processar_fala_usuario(self, comando: str) -> str:
+        """Processa a fala do usuário (local ou via LLM) e retorna o texto completo."""
+        local = self.processar_fala_local_rapida(comando)
+        if local is not None:
+            return local
+
+        comando_limpo = comando.strip()
+        t_llm = time.perf_counter()
         lembrancas = self.memoria.recuperar_lembrancas_para_prompt(comando_limpo)
         if self.contexto_conversa:
-            resumo_ctx = f"\n[Contexto recente da sessão: {self.contexto_conversa}]"
+            resumo_ctx = f"\n[Contexto ativo: {self.contexto_conversa}]"
             lembrancas = f"{lembrancas}{resumo_ctx}".strip()
 
-        mensagens_ia = list(self.historico_sessao[-10:]) + [{"role": "user", "content": comando_limpo}]
-        eventos_pensar = list(self.cerebro.pensar_stream(mensagens_ia, lembrancas=lembrancas))
+        mensagens_ia = list(self.historico_sessao[-8:]) + [{"role": "user", "content": comando_limpo}]
+        partes = []
+        primeiro_token = True
+        for ev in self.cerebro.pensar_stream(mensagens_ia, lembrancas=lembrancas):
+            if ev["tipo"] == "chunk":
+                if primeiro_token:
+                    self.ultimo_llm_ttft_ms = (time.perf_counter() - t_llm) * 1000.0
+                    primeiro_token = False
+                partes.append(ev["texto"])
+            elif ev["tipo"] == "erro":
+                return f"[EMOCAO:preocupacao] {ev.get('mensagem', 'Erro ao consultar o cérebro.')}"
 
-        texto_resposta = "".join([e["texto"] for e in eventos_pensar if e["tipo"] == "chunk"]).strip()
+        texto_resposta = "".join(partes).strip()
         if not texto_resposta:
-            erros = [e.get("mensagem", "") for e in eventos_pensar if e.get("tipo") == "erro"]
-            if erros:
-                return f"[EMOCAO:preocupacao] {erros[0]}"
-            return "[EMOCAO:preocupacao] Perdão, Henry. Não consegui formular uma resposta agora."
+            return "[EMOCAO:preocupacao] Perdão, Henry. Não consegui responder agora."
 
+        self.ultima_origem_resposta = "llm_stream"
         self.memoria.gravar_mensagem("voce", comando_limpo)
         self.memoria.gravar_mensagem("assistente", texto_resposta)
         self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(texto_resposta))
         return texto_resposta
 
+    def _responder_com_llm_streaming(self, comando_limpo: str) -> None:
+        """Gera a resposta no LLM em streaming e envia sentença por sentença direto para o TTS."""
+        t_llm = time.perf_counter()
+        lembrancas = self.memoria.recuperar_lembrancas_para_prompt(comando_limpo)
+        if self.contexto_conversa:
+            resumo_ctx = f"\n[Contexto ativo: {self.contexto_conversa}]"
+            lembrancas = f"{lembrancas}{resumo_ctx}".strip()
+
+        mensagens_ia = list(self.historico_sessao[-8:]) + [{"role": "user", "content": comando_limpo}]
+        texto_completo_acumulado: list[str] = []
+        primeiro_chunk = True
+
+        def _gerador_sentencas() -> Generator[str, None, None]:
+            nonlocal primeiro_chunk
+            buffer_atual = ""
+            for ev in self.cerebro.pensar_stream(mensagens_ia, lembrancas=lembrancas):
+                if self.sintetizador.foi_interrompida:
+                    break
+                if ev["tipo"] == "chunk":
+                    pedaco = ev["texto"]
+                    if primeiro_chunk:
+                        self.ultimo_llm_ttft_ms = (time.perf_counter() - t_llm) * 1000.0
+                        self._evento_interno({"tipo": "pensando", "ativo": False})
+                        primeiro_chunk = False
+
+                    texto_completo_acumulado.append(pedaco)
+                    buffer_atual += pedaco
+
+                    # Extrai emoções assim que aparecem
+                    for _, emo in extrair_emocoes_texto(buffer_atual):
+                        self._evento_interno({"tipo": "emocao", "nome": emo, "intensidade": 0.8})
+                    buffer_atual = limpar_emocoes_texto(buffer_atual)
+
+                    # Emite cada sentença completa assim que um ponto final/interrogação/exclamação chega
+                    while True:
+                        m = re.search(r"^(.+?[.!?…])\s+(.*)$", buffer_atual, re.DOTALL)
+                        if not m:
+                            break
+                        sentenca_pronta = m.group(1).strip()
+                        buffer_atual = m.group(2)
+                        if sentenca_pronta:
+                            yield sentenca_pronta
+
+                elif ev["tipo"] == "erro":
+                    self._evento_interno({"tipo": "pensando", "ativo": False})
+                    yield ev.get("mensagem", "Ocorreu um problema na consulta.")
+                    return
+
+            restante = limpar_emocoes_texto(buffer_atual).strip()
+            if restante and not self.sintetizador.foi_interrompida:
+                if primeiro_chunk:
+                    self.ultimo_llm_ttft_ms = (time.perf_counter() - t_llm) * 1000.0
+                    self._evento_interno({"tipo": "pensando", "ativo": False})
+                    primeiro_chunk = False
+                yield restante
+
+        self.ultima_origem_resposta = "llm_stream"
+        self.sintetizador.falar_stream(_gerador_sentencas())
+        self._evento_interno({"tipo": "pensando", "ativo": False})
+
+        resposta_final = "".join(texto_completo_acumulado).strip()
+        if resposta_final:
+            self.memoria.gravar_mensagem("voce", comando_limpo)
+            self.memoria.gravar_mensagem("assistente", resposta_final)
+            self._registrar_turno_sessao(comando_limpo, limpar_emocoes_texto(resposta_final))
+
     def _loop_principal(self) -> None:
-        """Loop contínuo de captura, detecção de modo, barge-in e resposta falada."""
+        """Loop contínuo de captura, detecção direcionada, streaming LLM->TTS e registro de métricas."""
         while not self._parar_evento.is_set():
             try:
                 agora = time.time()
@@ -285,18 +412,17 @@ class OrquestradorVoz:
                     self.contexto_conversa["aguardando_escolha_midia"] = False
                     self._evento_interno({"tipo": "modo", "nome": "compacto"})
 
-                # Se houve barge-in no ciclo anterior, aproveita o áudio já capturado e complementa se necessário
                 if self.sintetizador.audio_barge_in is not None:
                     audio_inicial = self.sintetizador.audio_barge_in
                     self.sintetizador.audio_barge_in = None
-                    audio_extra = self.ouvinte.gravar_fala(limite_silencio=0.9, timeout=1.5, parar_evento=self._parar_evento)
+                    audio_extra = self.ouvinte.gravar_fala(limite_silencio=0.55, timeout=1.0, parar_evento=self._parar_evento)
                     if audio_extra is not None:
                         audio = np.concatenate([audio_inicial, audio_extra], axis=0)
                     else:
                         audio = audio_inicial
                     em_janela_continua = True
                 else:
-                    audio = self.ouvinte.gravar_fala(timeout=4.5, parar_evento=self._parar_evento)
+                    audio = self.ouvinte.gravar_fala(timeout=4.0, parar_evento=self._parar_evento)
 
                 if self._parar_evento.is_set():
                     break
@@ -307,41 +433,60 @@ class OrquestradorVoz:
                 if not texto or len(texto.strip()) < 2:
                     continue
 
-                # Verifica se o usuário chamou "Gideon" ou se já está em Conversação Contínua / Livre
                 tem_wake, comando_extraido = self.ouvinte.extrair_wake_word(texto)
 
                 if tem_wake:
                     comando = comando_extraido
                 elif em_janela_continua:
-                    # No modo livre, filtra ruídos soltos de 1 palavra que não sejam confirmações ou comandos conhecidos
-                    if self.modo_escuta == ModoEscuta.CONVERSA_LIVRE and not self._em_conversa_ativa:
-                        palavras = normalizar(texto).split()
-                        if len(palavras) < 2 and resposta_confirmacao(texto) is None and not eh_interrupcao_barge_in(texto):
-                            continue
+                    prob = avaliar_fala_direcionada(
+                        texto,
+                        self.contexto_conversa,
+                        sessao_ativa=self._em_conversa_ativa,
+                    )
+                    if prob < 0.65:
+                        continue
                     comando = texto.strip()
                 else:
-                    continue  # Não era com a Gideon
+                    # Mesmo no modo por nome, aceita comandos claros direcionados se houver contexto recente (< 45s)
+                    if (time.time() - self._ultimo_contato) < 45.0 and avaliar_fala_direcionada(texto, self.contexto_conversa, False) >= 0.88:
+                        comando = texto.strip()
+                    else:
+                        continue
 
                 print(f"\n  [Voz] Henry disse: '{comando if comando else texto}'")
                 self._em_conversa_ativa = True
                 self._ultimo_contato = time.time()
 
-                # Materializa a Gideon em modo conversa
                 self._evento_interno({"tipo": "modo", "nome": "conversa"})
                 self._evento_interno({"tipo": "pensando", "ativo": True})
 
-                resposta_completa = self.processar_fala_usuario(comando)
-                self._evento_interno({"tipo": "pensando", "ativo": False})
+                # 1. Tenta resolução rápida local (< 5ms)
+                resposta_local = self.processar_fala_local_rapida(comando)
+                if resposta_local is not None:
+                    self._evento_interno({"tipo": "pensando", "ativo": False})
+                    texto_fala = self._emitir_emocoes_e_limpar(resposta_local)
+                    print(f"  [Voz] Gideon responde ({self.ultima_origem_resposta}): '{texto_fala}'")
+                    self.sintetizador.falar(texto_fala)
+                else:
+                    # 2. Resolução via LLM com Streaming Sentença-por-Sentença para o TTS
+                    self._responder_com_llm_streaming(comando)
 
-                texto_fala = self._emitir_emocoes_e_limpar(resposta_completa)
-                print(f"  [Voz] Gideon responde: '{texto_fala}'")
-
-                self.sintetizador.falar(texto_fala)
+                # Registra métricas reais do turno (p50 / p95 / TTFA)
+                metricas_voz_global.registrar(
+                    modo_escuta=self.modo_escuta.value,
+                    origem_resposta=self.ultima_origem_resposta,
+                    voz_id=self.sintetizador.voz_id,
+                    vad_endpoint_ms=self.ouvinte.ultima_latencia_vad_ms,
+                    stt_ms=self.ouvinte.ultima_latencia_stt_ms,
+                    nlu_ms=self.ultimo_nlu_ms,
+                    llm_ttft_ms=self.ultimo_llm_ttft_ms,
+                    tts_ttfa_ms=self.sintetizador.ultima_latencia_ttfa_ms,
+                )
                 self._ultimo_contato = time.time()
 
             except Exception as e:
                 print(f"  [Voz] Erro no laço de voz: {e}")
-                time.sleep(0.4)
+                time.sleep(0.3)
 
     def _processar_comando_sistema(self, comando: str) -> str | None:
         """Confirma e executa comandos sensíveis protegidos pelo Portão Vermelho."""
@@ -353,7 +498,7 @@ class OrquestradorVoz:
         if self._confirmacao_pendente:
             confirmacao = resposta_confirmacao(comando)
             if confirmacao is None:
-                return "[EMOCAO:duvida] Preciso que você diga sim para confirmar ou não para cancelar, Henry."
+                return "[EMOCAO:duvida] Diga sim para confirmar ou não para cancelar, Henry."
 
             ferramenta = self._confirmacao_pendente
             params = self._parametros_pendentes
@@ -361,7 +506,7 @@ class OrquestradorVoz:
             self._parametros_pendentes = {}
 
             if not confirmacao:
-                return "[EMOCAO:neutra] Ação cancelada, Henry."
+                return "[EMOCAO:neutra] Cancelado."
 
             resultado = self._catalogo.executar(
                 ferramenta,
@@ -373,7 +518,7 @@ class OrquestradorVoz:
                 return str(resultado.get("motivo", "Não foi possível executar a ação."))
             saida = resultado.get("saida")
             if isinstance(saida, dict):
-                return str(saida.get("mensagem") or saida.get("erro") or "Ação concluída.")
+                return str(saida.get("mensagem") or saida.get("erro") or "Concluído.")
             return str(saida)
 
         ferramenta = detectar_comando_sistema(comando)
@@ -384,5 +529,5 @@ class OrquestradorVoz:
         self._parametros_pendentes = {}
         self._confirmacao_expira_em = agora + 30.0
         if ferramenta == "atualizar_sistemas":
-            return "[EMOCAO:concentracao] Vou buscar e instalar código do seu repositório privado. Confirma a atualização?"
-        return "[EMOCAO:preocupacao] Vou encerrar o cérebro, a voz e o holograma da Gideon. Confirma?"
+            return "[EMOCAO:concentracao] Confirma a atualização dos meus sistemas pelo repositório privado?"
+        return "[EMOCAO:preocupacao] Confirma o encerramento completo da Gideon?"

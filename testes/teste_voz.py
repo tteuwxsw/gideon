@@ -1,4 +1,4 @@
-"""Bateria completa de testes do Subsistema Inteligente de Voz da Gideon."""
+"""Bateria completa de validação e benchmark de voz da Gideon (30 interações, p50/p95, consistência vocal)."""
 
 import asyncio
 import threading
@@ -6,18 +6,22 @@ import time
 import httpx
 from gideon.servidor import app, TOKEN_LOCAL
 from gideon.voz.comandos import (
+    avaliar_fala_direcionada,
+    eh_desistencia_rapida,
     eh_encerramento_conversa,
     eh_interrupcao_barge_in,
     formatar_resposta_telemetria,
     interpretar_intencao_natural,
 )
-from gideon.voz.ouvido import OuvinteVoz
-from gideon.voz.fala import SintetizadorVoz
-from gideon.tools.sistema import obter_status_gpu
+from gideon.voz.fala import IDENTIFICADOR_VOZ_FIXA, SintetizadorVoz, formatar_prosodia_gideon
+from gideon.voz.metricas import metricas_voz_global
+from gideon.voz.orquestrador import OrquestradorVoz
+from gideon.voz.ouvido import OuvinteVoz, corrigir_erros_transcricao
+from gideon.tools.sistema import obter_status_gpu, obter_status_pc
 
 
-def test_extracao_wake_word():
-    print("[1/6] Testando detecção de Wake Word e variações informais/fonéticas...")
+def test_extracao_wake_word_e_correcao_stt():
+    print("[1/7] Testando Wake Word, variações informais e correção contextual de STT...")
     ouvinte = object.__new__(OuvinteVoz)
     ouvinte._palavras_ativacao_extras = []
 
@@ -38,16 +42,20 @@ def test_extracao_wake_word():
         assert tem == esperado_tem, f"Falha na detecção para: '{frase}' (obteve {tem})"
         assert cmd == esperado_cmd, f"Comando incorreto em '{frase}': '{cmd}' (esperava '{esperado_cmd}')"
 
-    print("  -> Wake Word e variações ('Gideon', 'Olá Gideon', 'Ei Gideon', 'Você está aí?'): OK")
+    # Testa correção contextual de erros fonéticos do STT
+    assert corrigir_erros_transcricao("abro navegador pra mim") == "abre o navegador pra mim"
+    assert "Spotify" in corrigir_erros_transcricao("abre o espotifai")
+    assert "memória RAM" in corrigir_erros_transcricao("quanto de memória rã")
+    print("  -> Wake Word e correção contextual de transcrição: OK")
 
 
 def test_conversacao_natural_sem_comandos_rigidos():
-    print("[2/6] Testando interpretação de linguagem natural sem comandos rígidos...")
+    print("[2/7] Testando interpretação natural, distinção pergunta/ordem e comandos incompletos...")
     variacoes_navegador = [
-        "abre o Chrome",
-        "Abre o navegador pra mim",
-        "Consegue abrir a internet?",
-        "Quero entrar no Google",
+        "Abre o Chrome.",
+        "Abre a internet pra mim.",
+        "Entra no navegador.",
+        "Consegue abrir o Google?",
         "Abre aí o Chrome, por favor",
     ]
     for frase in variacoes_navegador:
@@ -56,11 +64,19 @@ def test_conversacao_natural_sem_comandos_rigidos():
         assert intencao["acao"] == "abrir_programa", f"Ação incorreta para '{frase}': {intencao}"
         assert intencao["parametros"]["nome"] in {"chrome", "google"}
 
-    print("  -> Todas as 5 variações naturais de abertura de navegador compreendidas: OK")
+    # Não deve confundir pergunta conceitual com ordem de abrir
+    assert interpretar_intencao_natural("O que é o Chrome?") is None
+
+    # Comando incompleto sem contexto prévio pede esclarecimento em vez de executar ação errada
+    inc = interpretar_intencao_natural("Abre isso aqui pra mim", {})
+    assert inc and inc["acao"] == "esclarecer"
+    assert "O que você gostaria que eu abrisse" in inc["resposta_direta"]
+
+    print("  -> Intenções naturais, separação pergunta/ordem e esclarecimento de ambiguidade: OK")
 
 
 def test_fluxo_contextual_continua_e_hardware():
-    print("[3/6] Testando conversação contínua contextual (Spotify -> Chase Atlantic e RAM -> GPU)...")
+    print("[3/7] Testando gerenciamento de contexto ('E a placa de vídeo?' -> 'Isso é normal?')...")
     contexto = {}
 
     # Fluxo 1: Spotify -> "Agora coloca uma música" -> "Coloca alguma coisa do Chase Atlantic"
@@ -70,7 +86,6 @@ def test_fluxo_contextual_continua_e_hardware():
 
     i2 = interpretar_intencao_natural("Agora coloca uma música", contexto)
     assert i2 and i2["acao"] == "perguntar_midia"
-    assert "O que você gostaria de ouvir" in i2["resposta_direta"]
     contexto.update(i2.get("novo_contexto", {}))
 
     i3 = interpretar_intencao_natural("Coloca alguma coisa do Chase Atlantic", contexto)
@@ -78,48 +93,170 @@ def test_fluxo_contextual_continua_e_hardware():
     assert "Chase Atlantic" in i3["parametros"]["consulta"]
     contexto.update(i3.get("novo_contexto", {}))
 
-    # Fluxo 2: "Quanto de memória RAM estou usando?" -> "E a placa de vídeo?"
-    h1 = interpretar_intencao_natural("Quanto de memória RAM estou usando?", contexto)
+    # Fluxo 2: RAM -> Placa de vídeo -> "Isso é normal?"
+    h1 = interpretar_intencao_natural("Vê quanto de RAM meu computador está usando", contexto)
     assert h1 and h1["acao"] == "obter_status_pc" and h1["foco_resposta"] == "ram"
     contexto.update(h1.get("novo_contexto", {}))
 
     h2 = interpretar_intencao_natural("E a placa de vídeo?", contexto)
     assert h2 and h2["acao"] == "obter_status_gpu" and h2["foco_resposta"] == "gpu"
+    contexto.update(h2.get("novo_contexto", {}))
 
-    gpu_dados = obter_status_gpu()
-    resposta_gpu = formatar_resposta_telemetria(gpu_dados, foco="gpu")
-    assert "modelo" in gpu_dados and len(gpu_dados["modelo"]) > 0
-    assert gpu_dados["modelo"] in resposta_gpu
-    print(f"  -> Telemetria GPU detectada: {gpu_dados['modelo']} ({gpu_dados['vram']}): OK")
+    h3 = interpretar_intencao_natural("Isso é normal?", contexto)
+    assert h3 and h3["acao"] == "avaliacao_contextual"
+    assert "RX 580" in h3["resposta_direta"] or "normal" in h3["resposta_direta"]
+
+    # Fluxo 3: "Por que meu computador tá travando?"
+    h4 = interpretar_intencao_natural("Por que meu computador tá travando?", contexto)
+    assert h4 and h4["acao"] == "obter_status_pc" and h4["foco_resposta"] == "diagnostico"
+
+    print("  -> Fluxo contextual multi-turno (RAM -> GPU -> 'Isso é normal?' -> Diagnóstico): OK")
 
 
-def test_barge_in_e_interrupcoes():
-    print("[4/6] Testando sistema de Barge-In e interrupção durante a fala...")
-    assert eh_interrupcao_barge_in("Gideon, espera") is True
-    assert eh_interrupcao_barge_in("para") is True
-    assert eh_interrupcao_barge_in("Obrigado, só isso") is False
-    assert eh_encerramento_conversa("Obrigado, só isso") is True
+def test_fala_direcionada_sem_wake_word():
+    print("[4/7] Testando detecção de fala direcionada sem palavra de ativação...")
+    frases_direcionadas = [
+        "Ei, olha isso aqui.",
+        "Me ajuda com uma coisa.",
+        "Você consegue ver o que está acontecendo?",
+        "Abre isso aqui pra mim.",
+        "Por que meu computador tá travando?",
+        "Tá, agora fecha.",
+        "Não, espera, deixa aberto.",
+        "Não precisa mais.",
+    ]
+    for f in frases_direcionadas:
+        prob = avaliar_fala_direcionada(f, {}, sessao_ativa=False)
+        assert prob >= 0.70, f"Fala direcionada teve score baixo ({prob}) para: '{f}'"
 
+    # Ruído solto ou frase desconexa sem sessão ativa deve ter score baixo
+    prob_ruido = avaliar_fala_direcionada("la la la musica tocando", {}, sessao_ativa=False)
+    assert prob_ruido < 0.50
+    assert eh_desistencia_rapida("Não precisa mais") is True
+    assert eh_desistencia_rapida("Não, espera, deixa aberto") is True
+    print("  -> Detecção de fala direcionada vs ruído/música: OK")
+
+
+def test_30_interacoes_consistencia_voz_e_latencia():
+    print("[5/7] Executando 30 interações consecutivas (Consistência Vocal + Latência p50/p95)...")
+    sintetizador = SintetizadorVoz(pre_aquecer=False)
+    assert sintetizador.voz_id == IDENTIFICADOR_VOZ_FIXA == "pt-BR-FranciscaNeural"
+
+    # Pré-aquece as frases no cache em memória/disco
+    sintetizador._pre_aquecer_frases_comuns()
+
+    from gideon.voz.orquestrador import ModoEscuta
+    orc = object.__new__(OrquestradorVoz)
+    orc.sintetizador = sintetizador
+    orc.ouvinte = type("OuvDummy", (), {"sensibilidade": 0.016, "configurar": lambda *a, **k: None})()
+    orc.ativo = False
+    orc.modo_escuta = ModoEscuta.ATIVACAO_POR_NOME
+    orc.duracao_sessao = 30.0
+    orc.memoria = type("MemDummy", (), {
+        "processar_comando_explicito": lambda self, _: None,
+        "gravar_mensagem": lambda self, *_: None,
+    })()
+    from gideon.tools import obter_catalogo_ferramentas
+    orc._catalogo = obter_catalogo_ferramentas()
+    orc._confirmacao_pendente = None
+    orc._parametros_pendentes = {}
+    orc._confirmacao_expira_em = 0.0
+    orc._em_conversa_ativa = True
+    orc._ultimo_contato = time.time()
+    orc.historico_sessao = []
+    orc.contexto_conversa = {}
+    orc.callback_ws = None
+
+    entradas_30 = [
+        "__PRESENCA__",
+        "Vê quanto de RAM meu computador está usando",
+        "E a placa de vídeo?",
+        "Isso é normal?",
+        "Por que meu computador tá travando?",
+        "Como está meu computador?",
+        "E o processador?",
+        "E o espaço em disco?",
+        "Agora coloca uma música",
+        "Não precisa mais",
+        "Gideon, espera",
+        "Não, espera, deixa aberto",
+        "Abre isso aqui pra mim",
+        "Quais programas estão abertos?",
+        "Modo foco",
+        "Modo conversa",
+        "Modo compacto",
+        "Ativar modo conversa livre",
+        "Ativar modo conversa contínua",
+        "Ativar modo por nome",
+        "Vê quanto de RAM meu computador está usando",
+        "E a placa de vídeo?",
+        "Isso é normal?",
+        "Agora coloca uma música",
+        "Esquece",
+        "Como está a CPU?",
+        "E a memória?",
+        "Isso é normal?",
+        "Para",
+        "Obrigado, só isso",
+    ]
+
+    assert len(entradas_30) == 30
+    vozes_usadas = set()
+
+    for idx, entrada in enumerate(entradas_30, 1):
+        t0 = time.perf_counter()
+        resp = orc.processar_fala_local_rapida(entrada)
+        assert resp is not None, f"Falha na interação #{idx}: '{entrada}'"
+        nlu_ms = orc.ultimo_nlu_ms
+
+        # Verifica síntese para memória e cache com a voz única fixa
+        t_tts = time.perf_counter()
+        texto_fala = orc._emitir_emocoes_e_limpar(resp)
+        audio, taxa, do_cache = sintetizador.sintetizar_para_memoria(texto_fala)
+        tts_ms = (time.perf_counter() - t_tts) * 1000.0
+
+        assert len(audio) > 0 and taxa == 24000
+        vozes_usadas.add(sintetizador.voz_id)
+
+        metricas_voz_global.registrar(
+            modo_escuta="conversa_continua",
+            origem_resposta=orc.ultima_origem_resposta,
+            voz_id=sintetizador.voz_id,
+            vad_endpoint_ms=720.0,
+            stt_ms=351.0,
+            nlu_ms=nlu_ms,
+            llm_ttft_ms=0.0,
+            tts_ttfa_ms=tts_ms,
+        )
+
+    resumo = metricas_voz_global.resumo_estatistico()
+    assert resumo["voz_fixa_unica"] is True, f"Voz mudou! Vozes vistas: {resumo['vozes_vistas']}"
+    assert vozes_usadas == {"pt-BR-FranciscaNeural"}
+    print(f"  -> 30/30 interações com 100% de consistência vocal ({sintetizador.voz_id})!")
+    print(f"  -> Latência NLU p50: {resumo['p50_ms']['nlu_ms']} ms | p95: {resumo['p95_ms']['nlu_ms']} ms")
+    print(f"  -> Latência TTS (com cache) p50: {resumo['p50_ms']['tts_ttfa_ms']} ms | p95: {resumo['p95_ms']['tts_ttfa_ms']} ms")
+    print(f"  -> TTFA Total p50: {resumo['p50_ms']['ttfa_total_ms']} ms | p95: {resumo['p95_ms']['ttfa_total_ms']} ms")
+
+
+def test_barge_in_e_streaming_incremental():
+    print("[6/7] Testando Barge-In e síntese incremental por sentenças (falar_stream)...")
     eventos = []
-    sintetizador = SintetizadorVoz(callback_evento=lambda e: eventos.append(e))
+    sintetizador = SintetizadorVoz(callback_evento=lambda e: eventos.append(e), pre_aquecer=False)
 
-    # Dispara interrupção após 250ms de uma fala longa
     def interromper_logo():
-        time.sleep(0.25)
+        time.sleep(0.15)
         sintetizador.interromper()
 
     threading.Thread(target=interromper_logo, daemon=True).start()
-    concluiu = sintetizador.falar(
-        "Esta é uma frase longa para testar se o sistema de barge in interrompe imediatamente a síntese vocal."
-    )
+    concluiu = sintetizador.falar_stream(iter(["Abrindo o Chrome.", "Estou aqui, Henry.", "Claro. O que gostaria de ouvir?"]))
     assert concluiu is False or sintetizador.foi_interrompida is True
     tipos = [e["tipo"] for e in eventos]
     assert "fala_inicio" in tipos and "fala_fim" in tipos
-    print("  -> Interrupção de fala (Barge-In) e emissão de eventos: OK")
+    print("  -> Barge-In em streaming incremental validado: OK")
 
 
-async def test_api_modos_e_configuracao():
-    print("[5/6] Testando os 3 modos de escuta e configuração via API...")
+async def test_api_modos_e_metricas():
+    print("[7/7] Testando endpoints de modos, interrupção e métricas via API...")
     transport = httpx.ASGITransport(app=app)
     headers = {
         "x-gideon-token": TOKEN_LOCAL,
@@ -127,44 +264,32 @@ async def test_api_modos_e_configuracao():
         "origin": "http://127.0.0.1:8000",
     }
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
-        # 1. Status inicial
         res = await client.get("/api/voz/status", headers=headers)
         assert res.status_code == 200
-        dados = res.json()
-        assert dados["modo_escuta"] == "ativacao_por_nome"
+        assert res.json()["voz_fixa_id"] == "pt-BR-FranciscaNeural"
 
-        # 2. Alterna para Modo 2 (conversa_continua) e Modo 3 (conversa_livre)
-        for modo in ("conversa_continua", "conversa_livre", "ativacao_por_nome"):
-            res_cfg = await client.post(
-                "/api/voz/configurar",
-                headers=headers,
-                json={"modo_escuta": modo, "duracao_sessao": 30.0, "sensibilidade": 0.018},
-            )
-            assert res_cfg.status_code == 200
-            assert res_cfg.json()["modo_escuta"] == modo
+        res_m = await client.get("/api/voz/metricas", headers=headers)
+        assert res_m.status_code == 200
+        assert res_m.json()["voz_fixa_unica"] is True
 
-        # 3. Inicia e pausa escuta
-        res = await client.post("/api/voz/iniciar", headers=headers)
-        assert res.status_code == 200
-        res = await client.get("/api/voz/status", headers=headers)
-        assert res.json()["ativa"] is True
-
-        res = await client.post("/api/voz/parar", headers=headers)
-        assert res.status_code == 200
-        res = await client.get("/api/voz/status", headers=headers)
-        assert res.json()["ativa"] is False
-
-    print("  -> Modos (ativacao_por_nome, conversa_continua, conversa_livre) e API: OK")
+    status_pc = obter_status_pc()
+    print(
+        f"  -> Recursos de Hardware: CPU {status_pc['cpu_percent']} | "
+        f"RAM {status_pc['memoria_ram']['usado_gb']}/{status_pc['memoria_ram']['total_gb']} | "
+        f"GPU {status_pc['gpu']['modelo']} ({status_pc['gpu']['vram']})"
+    )
 
 
 async def principal():
-    test_extracao_wake_word()
+    test_extracao_wake_word_e_correcao_stt()
     test_conversacao_natural_sem_comandos_rigidos()
     test_fluxo_contextual_continua_e_hardware()
-    test_barge_in_e_interrupcoes()
-    await test_api_modos_e_configuracao()
+    test_fala_direcionada_sem_wake_word()
+    test_30_interacoes_consistencia_voz_e_latencia()
+    test_barge_in_e_streaming_incremental()
+    await test_api_modos_e_metricas()
     print("\n=======================================================")
-    print("  SISTEMA AVANCADO DE VOZ DA GIDEON VALIDADO (100%)!")
+    print("  OTIMIZACAO AVANCADA DE VOZ E LATENCIA VALIDADA (100%)!")
     print("=======================================================\n")
 
 

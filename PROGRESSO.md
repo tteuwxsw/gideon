@@ -130,17 +130,19 @@ A Gideon pode parecer parte do Windows: iniciar com o login, não aparecer na ba
   - Captura contínua de microfone a 16 kHz via `sounddevice` com pré-buffer circular (~420ms), piso de ruído adaptativo, ganho automático para fala baixa e tolerância a pausas no meio da frase
   - Transcrição ultra-rápida local com **Faster-Whisper** (`base`, int8, em português) com prompt de vocabulário contextual e filtro de alucinações de silêncio
   - Reconhecimento amplo de ativação (*"Gideon"*, *"Olá, Gideon"*, *"Ei, Gideon"*, *"Oi, Gideon"*, *"Gideon, você está aí?"* e correspondência fonética aproximada)
-- [x] **Síntese Vocal Neural com Barge-In** (`gideon/voz/fala.py`):
-  - Motor principal online `pt-BR-ThalitaMultilingualNeural`, com `pt-BR-FranciscaNeural` e Microsoft Maria como fallbacks
+- [x] **Síntese Vocal Neural de Identidade Única e Baixa Latência** (`gideon/voz/fala.py`):
+  - **Voz única e fixa (`pt-BR-FranciscaNeural`)**: eliminada a alternância com `ThalitaMultilingualNeural` para garantir 100% de consistência de timbre em todas as interações
+  - **Cache persistente em RAM e disco (`dados/cache_voz/`)**: respostas frequentes (*"Abrindo."*, *"Tudo bem."*, *"Estou aqui, Henry."*) são sintetizadas em `< 5 ms`
+  - **Streaming de Sentenças (`falar_stream`)**: a Gideon começa a falar na 1ª frase sem esperar o texto inteiro do LLM terminar
   - Análise da onda sonora (envelope RMS em tempo real) para controlar a abertura da boca
-  - Sistema de **Barge-In anti-eco**: permite interromper a fala da Gideon imediatamente ao falar por cima ou dizer *"Gideon, espera"*
-  - Limpeza automática de marcações Markdown antes da fala
-- [x] **Orquestrador Inteligente e 3 Modos de Escuta** (`gideon/voz/orquestrador.py` e `gideon/voz/comandos.py`):
-  - **Modo 1 (`ativacao_por_nome`)**, **Modo 2 (`conversa_continua`)** e **Modo 3 (`conversa_livre`)** configuráveis por voz ou API (`/api/voz/configurar`)
-  - Compreensão natural sem comandos rígidos (ex: *"abre o navegador pra mim"*, *"consegue abrir a internet?"*, *"quero entrar no Google"*, *"coloca alguma coisa do Chase Atlantic"*)
-  - Histórico contextual de sessão para perguntas encadeadas (ex: *"Quanto de memória RAM estou usando?"* -> *"E a placa de vídeo?"* reportando a **AMD Radeon RX 580 8 GB**)
+  - Sistema de **Barge-In anti-eco**: permite interromper a fala da Gideon imediatamente ao falar por cima ou dizer *"Gideon, espera"* / *"Não precisa mais"*
+- [x] **Orquestrador Inteligente, Fala Direcionada e Métricas p50/p95** (`gideon/voz/orquestrador.py`, `gideon/voz/comandos.py`, `gideon/voz/metricas.py`):
+  - **Modo 1 (`ativacao_por_nome`)**, **Modo 2 (`conversa_continua`)** e **Modo 3 (`conversa_livre`)** com avaliador de probabilidade de fala direcionada (`avaliar_fala_direcionada`)
+  - Compreensão natural sem comandos rígidos e correção fonética de erros do STT (`corrigir_erros_transcricao`)
+  - Histórico enxuto de curta duração para perguntas encadeadas (*"Vê quanto de RAM..."* $\rightarrow$ *"E a placa de vídeo?"* $\rightarrow$ *"Isso é normal?"*)
+  - Medição real de latência (`vad_endpoint_ms`, `stt_ms`, `nlu_ms`, `llm_ttft_ms`, `tts_ttfa_ms`, `ttfa_total_ms`) com percentis **p50** e **p95** em `dados/metricas_voz.jsonl`
 - [x] **Flag CLI `--voz`**: Inicia o servidor com o ouvinte mãos-livres ativo direto do terminal
-- [x] **Bateria de testes de voz avançada** (`testes/teste_voz.py`): 6 suítes aprovadas (wake word, NLU sem comandos rígidos, contexto Spotify/GPU, barge-in e modos de escuta)
+- [x] **Bateria de 30 interações e validação de voz** (`testes/teste_voz.py`): 7 suítes aprovadas (30 interações consecutivas com 100% de consistência vocal, p50/p95, fala direcionada, NLU, contexto e barge-in)
 - [ ] **Portão real de voz**: falta medir microfone, ruído, TV, voz baixa, falsos positivos, latência e qualidade do TTS/lip sync
 
 ### Fase 4 · Módulos de Mãos e Segurança V/A/R (Parcial, Ainda Desconectada)

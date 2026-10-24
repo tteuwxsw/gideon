@@ -538,6 +538,13 @@ async def interromper_voz(_: bool = Depends(autenticar)):
     return {"status": "ok", "interrompida": interrompeu}
 
 
+@app.get("/api/voz/metricas")
+async def metricas_voz(_: bool = Depends(autenticar)):
+    """Retorna as métricas reais de latência (p50, p95, TTFA) e consistência vocal."""
+    from gideon.voz.metricas import metricas_voz_global
+    return {"status": "ok", **metricas_voz_global.resumo_estatistico()}
+
+
 # ─── Ponto de Entrada ─────────────────────────────────────────
 
 def main():

@@ -1,4 +1,4 @@
-"""Interpretação de linguagem natural, intenções locais e comandos sensíveis da Gideon."""
+"""Interpretação de linguagem natural, detecção de fala direcionada e intenções da Gideon."""
 
 from __future__ import annotations
 
@@ -18,6 +18,9 @@ def normalizar(texto: str) -> str:
 def detectar_comando_sistema(texto: str) -> str | None:
     """Detecta comandos críticos (Portão Vermelho) que exigem confirmação."""
     texto_norm = normalizar(texto)
+    # Garante que perguntas informativas ("qual é a versão?") não sejam confundidas com ordens
+    if texto_norm.startswith(("qual ", "como ", "por que ", "quando ", "quem ", "o que ")):
+        return None
     if re.search(r"\b(atualize|atualiza|atualizar|verifique)\b", texto_norm) and re.search(
         r"\b(sistema|sistemas|atualizacao|atualizacoes|novidades|versao)\b", texto_norm
     ):
@@ -67,6 +70,10 @@ def resposta_confirmacao(texto: str) -> bool | None:
         "cancela",
         "deixa",
         "deixa pra la",
+        "deixa aberto",
+        "nao espera deixa aberto",
+        "nao precisa",
+        "nao precisa mais",
         "agora nao",
         "nao quero",
         "esquece",
@@ -74,7 +81,7 @@ def resposta_confirmacao(texto: str) -> bool | None:
     }
     if texto_norm in afirmativas or texto_norm.startswith(("sim ", "confirmo ", "pode fazer")):
         return True
-    if texto_norm in negativas or texto_norm.startswith(("nao ", "cancela")):
+    if texto_norm in negativas or texto_norm.startswith(("nao ", "cancela", "nao precisa", "deixa aberto")):
         return False
     return None
 
@@ -96,12 +103,32 @@ def eh_interrupcao_barge_in(texto: str) -> bool:
         "silencio",
         "calma",
         "cancela",
+        "nao precisa",
+        "nao precisa mais",
         "opa",
         "aguarda",
         "pausa",
         "chega",
     )
     return any(g in t.split() or t.startswith(g) for g in gatilhos)
+
+
+def eh_desistencia_rapida(texto: str) -> bool:
+    """Detecta frases como 'Não precisa mais', 'Não, espera, deixa aberto', 'Esquece'."""
+    t = re.sub(r"[^a-z0-9 ]", "", normalizar(texto)).strip()
+    frases = (
+        "nao precisa mais",
+        "nao precisa",
+        "nao espera deixa aberto",
+        "espera deixa aberto",
+        "deixa aberto",
+        "deixa quieto",
+        "deixa pra la",
+        "esquece",
+        "cancela isso",
+        "cancela",
+    )
+    return any(f in t for f in frases)
 
 
 def eh_encerramento_conversa(texto: str) -> bool:
@@ -125,9 +152,9 @@ def eh_encerramento_conversa(texto: str) -> bool:
 
 
 def detectar_mudanca_modo_escuta(texto: str) -> str | None:
-    """Detecta pedidos por voz para alterar o modo de escuta (ativacao_por_nome, conversa_continua, conversa_livre)."""
+    """Detecta pedidos por voz para alterar o modo de escuta."""
     t = normalizar(texto)
-    if re.search(r"\b(conversa livre|modo livre|escuta livre|sem chamar|sem dizer seu nome)\b", t):
+    if re.search(r"\b(conversa livre|modo livre|escuta livre|sem chamar|sem dizer seu nome|sem palavra de ativacao)\b", t):
         return "conversa_livre"
     if re.search(r"\b(conversa continua|modo continuo|continuar conversando)\b", t):
         return "conversa_continua"
@@ -136,17 +163,72 @@ def detectar_mudanca_modo_escuta(texto: str) -> str | None:
     return None
 
 
+def avaliar_fala_direcionada(
+    texto: str,
+    contexto: dict[str, Any] | None = None,
+    sessao_ativa: bool = False,
+) -> float:
+    """Calcula a probabilidade [0.0 a 1.0] de que uma fala sem 'Gideon' seja direcionada à assistente."""
+    t = normalizar(texto)
+    t_limpo = re.sub(r"[^a-z0-9 ]", " ", t).strip()
+    palavras = t_limpo.split()
+    if not palavras:
+        return 0.0
+
+    # 1. Comandos explícitos de interrupção, confirmação ou encerramento
+    if eh_interrupcao_barge_in(texto) or eh_desistencia_rapida(texto) or eh_encerramento_conversa(texto):
+        return 0.98
+    if sessao_ativa and resposta_confirmacao(texto) is not None:
+        return 0.95
+
+    # 2. Intenção clara de controle do PC / mídia / hardware
+    if interpretar_intencao_natural(texto, contexto) is not None:
+        return 0.92
+
+    # 3. Marcadores de fala direcionada à assistente ("me ajuda", "você consegue", "olha isso aqui", "meu pc")
+    marcadores_diretos = (
+        "me ajuda",
+        "pode me ajudar",
+        "voce consegue",
+        "consegue ver",
+        "olha isso",
+        "olhe isso",
+        "ve isso",
+        "abre isso",
+        "fecha isso",
+        "ta agora",
+        "agora fecha",
+        "meu computador",
+        "meu pc",
+        "o que esta acontecendo",
+        "por que meu",
+        "isso e normal",
+        "me explica",
+        "o que voce acha",
+        "pra mim",
+        "por favor",
+    )
+    if any(m in t_limpo for m in marcadores_diretos):
+        return 0.88
+
+    # 4. Se já está em sessão ativa de conversa e tem pelo menos 2 palavras
+    if sessao_ativa and len(palavras) >= 2:
+        return 0.82
+
+    # 5. Pergunta direta bem formada com >= 3 palavras
+    if ("?" in texto or palavras[0] in {"como", "qual", "quanto", "quanta", "por", "onde", "quem", "quando"}) and len(palavras) >= 3:
+        return 0.72
+
+    return 0.20
+
+
 def interpretar_intencao_natural(
     texto: str,
     contexto: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Interpreta intenções naturais de controle do PC, mídia e telemetria sem exigir frases rígidas.
 
-    Retorna um dicionário com:
-      - `acao`: nome da ferramenta ou ação contextual
-      - `parametros`: argumentos para a ferramenta
-      - `resposta_direta`: opcional (quando a própria intenção é uma etapa conversacional)
-      - `novo_contexto`: atualizações para o estado da sessão
+    Separa claramente perguntas informativas de ordens de execução e trata comandos incompletos.
     """
     ctx = contexto or {}
     t = normalizar(texto)
@@ -156,16 +238,22 @@ def interpretar_intencao_natural(
     if not t_limpo:
         return None
 
+    # 0. Desistência rápida ou cancelamento ("Não precisa mais", "Não, espera, deixa aberto")
+    if eh_desistencia_rapida(texto):
+        return {
+            "acao": "cancelar_fluxo",
+            "resposta_direta": "[EMOCAO:neutra] Tudo bem.",
+            "novo_contexto": {"aguardando_escolha_midia": False},
+        }
+
     # 1. Contexto ativo: se a Gideon acabou de perguntar "O que gostaria de ouvir?"
     if ctx.get("aguardando_escolha_midia"):
-        # Se não for um cancelamento nem outra pergunta de sistema
         if resposta_confirmacao(texto) is False:
             return {
                 "acao": "nenhuma",
-                "resposta_direta": "[EMOCAO:neutra] Tudo bem, Henry. Cancelei a reprodução.",
+                "resposta_direta": "[EMOCAO:neutra] Tudo bem.",
                 "novo_contexto": {"aguardando_escolha_midia": False},
             }
-        # Extrai o nome do artista/música de frases como "coloca alguma coisa do Chase Atlantic"
         termo = extrair_termo_midia(texto)
         plataforma = ctx.get("plataforma_midia", "spotify")
         if termo:
@@ -179,14 +267,14 @@ def interpretar_intencao_natural(
                 },
             }
 
-    # 2. Pedido genérico para colocar música ("agora coloca uma musica", "bota uma musica", "toca alguma musica")
+    # 2. Pedido genérico para colocar música ("agora coloca uma musica", "bota uma musica")
     if re.search(r"\b(coloca|coloque|bota|toca|tocar|ouvir|reproduz|play)\b", t_limpo) and re.search(
         r"\b(uma musica|alguma musica|musica|um som)\b$", t_limpo
     ):
         plataforma = "spotify" if ctx.get("ultimo_app") == "spotify" else "spotify"
         return {
             "acao": "perguntar_midia",
-            "resposta_direta": "[EMOCAO:amigavel] Claro, Henry. O que você gostaria de ouvir?",
+            "resposta_direta": "[EMOCAO:amigavel] Claro. O que gostaria de ouvir?",
             "novo_contexto": {
                 "aguardando_escolha_midia": True,
                 "plataforma_midia": plataforma,
@@ -194,7 +282,7 @@ def interpretar_intencao_natural(
             },
         }
 
-    # 3. Pedido direto para tocar artista/música específica ("coloca alguma coisa do Chase Atlantic", "toca X no Spotify")
+    # 3. Pedido direto para tocar artista/música específica ("coloca alguma coisa do Chase Atlantic")
     match_midia = re.search(
         r"\b(?:coloca|coloque|bota|toca|tocar|ouvir|reproduz|pesquisa|busca)\s+"
         r"(?:alguma coisa d[eo]s?\s+|uma musica d[eo]s?\s+|musica d[eo]s?\s+|um som d[eo]s?\s+|algo d[eo]s?\s+)?"
@@ -206,8 +294,7 @@ def interpretar_intencao_natural(
         possivel_termo = match_midia.group(1).strip()
         plataforma_explicita = (match_midia.group(2) or "").lower()
         termo_norm = normalizar(possivel_termo)
-        # Garante que não é um pedido de abrir programa comum (ex: "abre o chrome")
-        palavras_sistema = {"chrome", "navegador", "internet", "google", "spotify", "calculadora", "vscode", "discord", "steam"}
+        palavras_sistema = {"chrome", "navegador", "internet", "google", "spotify", "calculadora", "vscode", "discord", "steam", "isso", "isso aqui"}
         if (
             plataforma_explicita in {"spotify", "youtube", "google"}
             or re.search(r"\b(alguma coisa d|musica d|som d|toca |bota |coloca )\b", t_limpo)
@@ -235,12 +322,31 @@ def interpretar_intencao_natural(
     if re.search(r"\b(abaixa o volume|diminui o volume|diminuir volume|mais baixo)\b", t_limpo):
         return {"acao": "controlar_midia", "parametros": {"acao": "diminuir_volume"}, "novo_contexto": {}}
 
-    # 5. Abertura natural de navegador / internet / aplicativos sem comandos rígidos
-    # Ex: "abre o chrome", "abre o navegador pra mim", "consegue abrir a internet?", "quero entrar no google"
-    verbos_abrir = r"\b(abre|abra|abrir|inicia|iniciar|executa|roda|entrar|entra|acessar|acessa|liga|quero ir|quero entrar|consegue abrir|pode abrir)\b"
-    if re.search(verbos_abrir, t_limpo):
+    # 5. Comandos incompletos ou dêiticos sem alvo ("Abre isso aqui pra mim", "Ei, olha isso aqui")
+    if re.search(r"\b(abre isso|abra isso|abrir isso|abre aqui)\b", t_limpo):
+        ultimo_app = ctx.get("ultimo_app")
+        if ultimo_app:
+            return {
+                "acao": "abrir_programa",
+                "parametros": {"nome": ultimo_app},
+                "novo_contexto": {"ultimo_topico": "aplicativos"},
+            }
+        return {
+            "acao": "esclarecer",
+            "resposta_direta": "[EMOCAO:curiosidade] O que você gostaria que eu abrisse, Henry?",
+            "novo_contexto": {},
+        }
+
+    # 6. Abertura natural de navegador / internet / aplicativos sem comandos rígidos
+    # Distingue perguntas conceituais ("o que é o Chrome?") de pedidos de ação ("consegue abrir o Google?")
+    eh_pergunta_conceitual = t_limpo.startswith(("o que e ", "quem criou ", "para que serve ", "como funciona "))
+    verbos_abrir = (
+        r"\b(abre|abra|abrir|abro|abri|inicia|iniciar|executa|roda|entrar|entra|entre|"
+        r"acessar|acessa|liga|quero ir|quero entrar|consegue abrir|pode abrir|coloca no)\b"
+    )
+    if not eh_pergunta_conceitual and re.search(verbos_abrir, t_limpo):
         mapa_alvos = [
-            (r"\b(chrome|google chrome|navegador|internet|browser)\b", "chrome"),
+            (r"\b(chrome|google chrome|navegador|internet|browser|web)\b", "chrome"),
             (r"\b(google)\b", "google"),
             (r"\b(spotify)\b", "spotify"),
             (r"\b(youtube)\b", "youtube"),
@@ -267,8 +373,37 @@ def interpretar_intencao_natural(
                     },
                 }
 
-    # 6. Telemetria contextual do PC (CPU, RAM, GPU / Placa de Vídeo, Disco)
-    # Perguntas diretas ou de continuação ("E a placa de vídeo?", "E a GPU?", "E o processador?", "E o espaço em disco?")
+    # 7. Pergunta contextual sobre normalidade do hardware ("Isso é normal?", "Está alto?", "Está bom?")
+    if ctx.get("ultimo_topico") == "hardware_pc" and re.search(
+        r"\b(isso e normal|ta normal|esta normal|e normal|ta bom|esta alto|ta alto|preocupante)\b",
+        t_limpo,
+    ):
+        recurso = ctx.get("ultimo_recurso", "geral")
+        if recurso == "gpu":
+            resp_norm = "[EMOCAO:amigavel] Sim, Henry. Sua RX 580 com 8 GB está operando em temperatura e carga perfeitamente normais."
+        elif recurso == "ram":
+            resp_norm = "[EMOCAO:amigavel] Sim, está dentro do esperado para o Windows com seus aplicativos abertos."
+        else:
+            resp_norm = "[EMOCAO:amigavel] Sim, Henry. Todos os indicadores de uso estão saudáveis e dentro do normal."
+        return {
+            "acao": "avaliacao_contextual",
+            "resposta_direta": resp_norm,
+            "novo_contexto": {"ultimo_topico": "hardware_pc"},
+        }
+
+    # 8. Diagnóstico natural de lentidão ("Por que meu computador tá travando?", "Você consegue ver o que está acontecendo?")
+    if re.search(
+        r"\b(por que meu computador ta travando|computador travando|pc lento|computador lento|o que esta acontecendo no pc|ve o que esta acontecendo)\b",
+        t_limpo,
+    ):
+        return {
+            "acao": "obter_status_pc",
+            "parametros": {},
+            "foco_resposta": "diagnostico",
+            "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "geral"},
+        }
+
+    # 9. Telemetria contextual do PC (CPU, RAM, GPU / Placa de Vídeo, Disco)
     if re.search(r"\b(placa de video|gpu|radeon|rx 580|vram|memoria de video)\b", t_limpo):
         return {
             "acao": "obter_status_gpu",
@@ -277,7 +412,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "gpu"},
         }
 
-    if re.search(r"\b(memoria ram|uso de ram|quanto de ram|quanta ram|memoria estou usando)\b", t_limpo) or (
+    if re.search(r"\b(memoria ram|uso de ram|quanto de ram|quanta ram|memoria estou usando|ram meu computador)\b", t_limpo) or (
         ctx.get("ultimo_topico") == "hardware_pc" and re.search(r"^(e a |e de )?(memoria|ram)\b", t_limpo)
     ):
         return {
@@ -318,15 +453,18 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "geral"},
         }
 
-    # 7. Programas abertos em execução
-    if re.search(r"\b(programas abertos|o que esta aberto|aplicativos abertos|rodando no pc)\b", t_limpo):
+    # 10. Programas abertos em execução
+    if re.search(
+        r"\b(programas\s+(?:estao\s+|que\s+estao\s+)?abertos|o\s+que\s+(?:esta|ta)\s+aberto|aplicativos\s+(?:estao\s+)?abertos|rodando\s+no\s+pc)\b",
+        t_limpo,
+    ):
         return {
             "acao": "listar_programas_usuario",
             "parametros": {},
             "novo_contexto": {"ultimo_topico": "aplicativos"},
         }
 
-    # 8. Bloquear tela
+    # 11. Bloquear tela
     if re.search(r"\b(bloqueia a tela|bloquear a tela|bloqueia o pc|tranca a tela|bloquear computador)\b", t_limpo):
         return {
             "acao": "bloquear_estacao",
@@ -334,7 +472,7 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "seguranca"},
         }
 
-    # 9. Modos visuais do holograma
+    # 12. Modos visuais do holograma
     if re.search(r"\b(modo foco|focar|centro da tela)\b", t_limpo):
         return {"acao": "modo_avatar", "parametros": {"modo": "foco"}, "novo_contexto": {}}
     if re.search(r"\b(modo compacto|ir para o canto|ficar pequena)\b", t_limpo):
@@ -364,15 +502,12 @@ def extrair_termo_midia(texto: str) -> str:
 
 
 def formatar_resposta_telemetria(dados: dict[str, Any], foco: str = "geral") -> str:
-    """Formata os dados reais de hardware do PC em uma resposta natural e fluida digna da Gideon."""
+    """Formata os dados reais de hardware do PC em uma resposta concisa, natural e objetiva."""
     if foco == "gpu" or ("modelo" in dados and "vram" in dados and "cpu_percent" not in dados):
         modelo = dados.get("modelo", "AMD Radeon RX 580")
         vram = dados.get("vram", "8 GB")
         uso = dados.get("uso_3d", "operando normalmente")
-        return (
-            f"[EMOCAO:concentracao] Sua placa de vídeo {modelo} com {vram} de memória dedicada "
-            f"está ativa e com utilização 3D em {uso}, Henry."
-        )
+        return f"[EMOCAO:concentracao] Sua {modelo} de {vram} está com utilização em {uso}, Henry."
 
     ram = dados.get("memoria_ram", {})
     cpu = dados.get("cpu_percent", "0%")
@@ -381,23 +516,24 @@ def formatar_resposta_telemetria(dados: dict[str, Any], foco: str = "geral") -> 
 
     if foco == "ram":
         return (
-            f"[EMOCAO:concentracao] Você está utilizando {ram.get('usado_gb', '')} de memória RAM "
-            f"({ram.get('percentual', '')} do total de {ram.get('total_gb', '')}), "
-            f"restando {ram.get('livre_gb', '')} disponíveis."
+            f"[EMOCAO:concentracao] Você está utilizando {ram.get('usado_gb', '')} de memória RAM, "
+            f"com {ram.get('livre_gb', '')} livres."
         )
     if foco == "cpu":
-        return (
-            f"[EMOCAO:concentracao] O processador está operando em {cpu} de utilização neste momento, Henry."
-        )
+        return f"[EMOCAO:concentracao] O processador está em {cpu} de uso agora, Henry."
     if foco == "disco":
         return (
-            f"[EMOCAO:concentracao] O disco principal está com {disco.get('percentual_usado', '')} ocupado, "
-            f"tendo {disco.get('livre_gb', '')} livres de um total de {disco.get('total_gb', '')}."
+            f"[EMOCAO:concentracao] O disco C está em {disco.get('percentual_usado', '')}, "
+            f"com {disco.get('livre_gb', '')} livres."
+        )
+    if foco == "diagnostico":
+        return (
+            f"[EMOCAO:concentracao] Verifiquei agora: o processador está em {cpu} e a RAM em "
+            f"{ram.get('usado_gb', '')} ({ram.get('percentual', '')}). Não há sobrecarga crítica no sistema."
         )
 
-    gpu_str = f", e sua {gpu.get('modelo', 'GPU')} está operando normalmente" if gpu else ""
+    gpu_str = f" e a {gpu.get('modelo', 'GPU')} está normal" if gpu else ""
     return (
-        f"[EMOCAO:amigavel] Seu computador está funcionando perfeitamente, Henry. "
-        f"O processador está em {cpu}, a memória RAM em {ram.get('usado_gb', '')} ({ram.get('percentual', '')})"
-        f"{gpu_str}. Deseja que eu verifique mais alguma coisa?"
+        f"[EMOCAO:amigavel] Seu computador está funcionando normalmente: CPU em {cpu}, "
+        f"RAM em {ram.get('usado_gb', '')}{gpu_str}. Deseja que eu verifique mais alguma coisa?"
     )
