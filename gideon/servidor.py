@@ -60,6 +60,8 @@ app.add_middleware(
 cerebro = Cerebro()
 memoria = Memoria()
 historico_conversa: list[dict[str, str]] = []
+orquestrador_voz = None
+_loop_servidor = None
 
 # Conexões WebSocket ativas (avatar Godot e outros clientes)
 _clientes_ws: set[WebSocket] = set()
@@ -194,6 +196,19 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
         raise HTTPException(status_code=400, detail="A mensagem não pode ser vazia.")
 
     historico_conversa.append({"role": "user", "content": texto_usuario})
+
+    # Detecta intenções de movimentação física da Gideon na tela
+    texto_lower = texto_usuario.lower()
+    if any(c in texto_lower for c in ["vai pro canto", "vai para o canto", "fica no canto", "modo compacto"]):
+        await broadcast_ws({"tipo": "modo", "nome": "compacto"})
+    elif any(c in texto_lower for c in ["vem pro centro", "vem para o centro", "modo conversa", "fica no meio"]):
+        await broadcast_ws({"tipo": "modo", "nome": "conversa"})
+    elif any(c in texto_lower for c in ["modo foco", "aumenta de tamanho", "fica maior"]):
+        await broadcast_ws({"tipo": "modo", "nome": "foco"})
+    elif any(c in texto_lower for c in ["canto esquerdo", "vai pra esquerda"]):
+        await broadcast_ws({"tipo": "modo", "nome": "canto_esquerdo"})
+    elif any(c in texto_lower for c in ["some da tela", "modo oculto", "oculta", "se esconde"]):
+        await broadcast_ws({"tipo": "modo", "nome": "oculto"})
 
     # 1. Verifica se é um comando explícito de memória ("lembra que...", "o que você sabe sobre mim?", etc.)
     resposta_comando_memoria = memoria.processar_comando_explicito(texto_usuario)
@@ -410,10 +425,51 @@ async def websocket_avatar(websocket: WebSocket, token: str | None = Query(None)
         print(f"  [WebSocket] Cliente desconectado: {cliente_id} (total: {len(_clientes_ws)})")
 
 
+# ─── Controle de Voz ──────────────────────────────────────────
+
+def obter_orquestrador():
+    global orquestrador_voz
+    if orquestrador_voz is None:
+        from gideon.voz.orquestrador import OrquestradorVoz
+        def repassar(ev):
+            if _loop_servidor and _loop_servidor.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast_ws(ev), _loop_servidor)
+        orquestrador_voz = OrquestradorVoz(cerebro, memoria, repassar)
+    return orquestrador_voz
+
+
+@app.post("/api/voz/iniciar")
+async def iniciar_voz(_: bool = Depends(autenticar)):
+    """Inicia o ouvinte contínuo de voz (Wake Word 'Gideon')."""
+    orc = obter_orquestrador()
+    orc.iniciar()
+    return {"status": "ok", "mensagem": "Escuta por voz ativada."}
+
+
+@app.post("/api/voz/parar")
+async def parar_voz(_: bool = Depends(autenticar)):
+    """Pausa a escuta contínua de voz."""
+    orc = obter_orquestrador()
+    orc.parar()
+    return {"status": "ok", "mensagem": "Escuta por voz pausada."}
+
+
+@app.get("/api/voz/status")
+async def status_voz(_: bool = Depends(autenticar)):
+    """Retorna se o microfone mãos-livres está escutando."""
+    orc = obter_orquestrador()
+    return {"status": "ok", "ativa": orc.ativo}
+
+
 # ─── Ponto de Entrada ─────────────────────────────────────────
 
 def main():
     """Inicia o servidor web local na porta 8000, restrito ao localhost."""
+    import sys
+    global _loop_servidor
+
+    ativar_voz_ao_iniciar = "--voz" in sys.argv
+
     url = f"http://127.0.0.1:8000/?token={TOKEN_LOCAL}"
     print()
     print("  ╔══════════════════════════════════════════════════════╗")
@@ -422,11 +478,20 @@ def main():
     print(f"  ║  Servidor: 127.0.0.1:8000                           ║")
     print(f"  ║  WebSocket: ws://127.0.0.1:8000/ws                  ║")
     print(f"  ║  Modelo: {cerebro.modelo:<43}  ║")
+    if ativar_voz_ao_iniciar:
+        print("  ║  Voz Mãos-Livres: ATIVA ('Gideon')                   ║")
     print("  ╠══════════════════════════════════════════════════════╣")
     print(f"  ║  Acesse no navegador:                               ║")
     print(f"  ║  {url}")
     print("  ╚══════════════════════════════════════════════════════╝")
     print()
+
+    @app.on_event("startup")
+    async def ao_iniciar():
+        global _loop_servidor
+        _loop_servidor = asyncio.get_running_loop()
+        if ativar_voz_ao_iniciar:
+            obter_orquestrador().iniciar()
 
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_level="info")
 

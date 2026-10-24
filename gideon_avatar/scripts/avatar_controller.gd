@@ -50,26 +50,19 @@ func _ready() -> void:
 
 
 func _configurar_janela() -> void:
-    # Garante suporte a janela transparente e sempre visível no Windows
+    # Janela 100% transparente, sem bordas, sempre visível e INTANGÍVEL (cliques passam direto)
     var janela_id = DisplayServer.MAIN_WINDOW_ID
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_TRANSPARENT, true, janela_id)
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, true, janela_id)
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true, janela_id)
+    
+    # Cliques do mouse atravessam o holograma — ela é uma entidade puramente visual
+    DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_MOUSE_PASSTHROUGH, true, janela_id)
 
 
-func _input(event: InputEvent) -> void:
-    # Permite ao Henry clicar e arrastar a Gideon pela tela
-    if event is InputEventMouseButton:
-        if event.button_index == MOUSE_BUTTON_LEFT:
-            if event.pressed:
-                _arrastando_janela = true
-                _posicao_clique_inicial = DisplayServer.mouse_get_position() - DisplayServer.window_get_position()
-            else:
-                _arrastando_janela = false
-
-    elif event is InputEventMouseMotion and _arrastando_janela:
-        var nova_posicao = DisplayServer.mouse_get_position() - _posicao_clique_inicial
-        DisplayServer.window_set_position(nova_posicao)
+func _input(_event: InputEvent) -> void:
+    # Nenhuma interação por mouse: controle 100% por voz e inteligência da Gideon
+    pass
 
 
 func _process(delta: float) -> void:
@@ -183,27 +176,62 @@ func _on_pensando_alterado(ativo: bool) -> void:
         _alvo_rotacao_cabeca = Vector3.ZERO
 
 
-func _on_modo_alterado(modo: String) -> void:
+# Controle de movimentação suave da janela (Tween)
+var _tween_janela: Tween
+
+
+func mover_janela_suave(pos_destino: Vector2i, tamanho_destino: Vector2i = Vector2i.ZERO, duracao: float = 0.8) -> void:
+    """Desliza suavemente a janela da Gideon pela tela como um holograma flutuante."""
     var janela_id = DisplayServer.MAIN_WINDOW_ID
+    var pos_atual = DisplayServer.window_get_position(janela_id)
+    var tam_atual = DisplayServer.window_get_size(janela_id)
+
+    if tamanho_destino == Vector2i.ZERO:
+        tamanho_destino = tam_atual
+
+    if _tween_janela and _tween_janela.is_valid():
+        _tween_janela.kill()
+
+    _tween_janela = create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+    
+    # Interpola a posição
+    _tween_janela.tween_method(
+        func(p: Vector2): DisplayServer.window_set_position(Vector2i(p), janela_id),
+        Vector2(pos_atual), Vector2(pos_destino), duracao
+    )
+    # Interpola o tamanho
+    _tween_janela.tween_method(
+        func(s: Vector2): DisplayServer.window_set_size(Vector2i(s), janela_id),
+        Vector2(tam_atual), Vector2(tamanho_destino), duracao
+    )
+
+
+func _on_modo_alterado(modo: String) -> void:
     var tela_tamanho = DisplayServer.screen_get_size()
 
     match modo.to_lower():
-        "compacto":
+        "compacto", "canto":
             modo_atual = ModoJanela.COMPACTO
-            DisplayServer.window_set_size(Vector2i(280, 360), janela_id)
-            # Posiciona no canto inferior direito
-            DisplayServer.window_set_position(Vector2i(tela_tamanho.x - 300, tela_tamanho.y - 420), janela_id)
+            var pos = Vector2i(tela_tamanho.x - 300, tela_tamanho.y - 420)
+            mover_janela_suave(pos, Vector2i(280, 360), 0.7)
 
-        "conversa":
+        "conversa", "centro_direita":
             modo_atual = ModoJanela.CONVERSA
-            DisplayServer.window_set_size(Vector2i(450, 650), janela_id)
-            DisplayServer.window_set_position(Vector2i(tela_tamanho.x - 480, tela_tamanho.y - 720), janela_id)
+            var pos = Vector2i(tela_tamanho.x - 480, tela_tamanho.y - 720)
+            mover_janela_suave(pos, Vector2i(450, 650), 0.6)
 
-        "foco":
+        "foco", "centro":
             modo_atual = ModoJanela.FOCO
-            DisplayServer.window_set_size(Vector2i(600, 850), janela_id)
-            # Centraliza mais na tela
-            DisplayServer.window_set_position(Vector2i((tela_tamanho.x - 600) / 2, (tela_tamanho.y - 850) / 2), janela_id)
+            var pos = Vector2i((tela_tamanho.x - 600) / 2, (tela_tamanho.y - 850) / 2)
+            mover_janela_suave(pos, Vector2i(600, 850), 0.9)
+
+        "canto_esquerdo":
+            var pos = Vector2i(40, tela_tamanho.y - 420)
+            mover_janela_suave(pos, Vector2i(280, 360), 0.7)
+
+        "canto_superior_direito":
+            var pos = Vector2i(tela_tamanho.x - 300, 40)
+            mover_janela_suave(pos, Vector2i(280, 360), 0.7)
 
         "oculto":
             modo_atual = ModoJanela.OCULTO
