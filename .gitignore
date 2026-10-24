@@ -1,0 +1,19 @@
+# Dados locais (memória, logs, progresso) — nunca vão pro git
+dados/
+
+# Variáveis de ambiente e segredos
+.env
+.env.*
+
+# Ambiente Python
+.venv/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store
+Thumbs.db
