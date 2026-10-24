@@ -56,7 +56,7 @@
 - [x] Atualizador exige repositório limpo, usa mutex, valida a versão candidata isoladamente, aplica somente `merge --ff-only`, sincroniza pelo lockfile e testa novamente.
 - [x] Comando falado de atualização conectado de forma determinística, com confirmação separada e reinício automático após sucesso.
 - [x] Identidade visual decidida: a meta é a aparência da Gideon de *The Flash* para uso pessoal; o GLB atual permanece explicitamente provisório.
-- [ ] Instalação no `%LOCALAPPDATA%` não executada nesta sessão, pois altera a inicialização do Windows e depende de esta versão estar publicada no GitHub.
+- [x] Instalação no `%LOCALAPPDATA%\Programs\Gideon` executada e registrada na Tarefa Agendada `Gideon`.
 - [x] Ciclo de atualização testado com árvore modificada: recusou sobrescrever os arquivos, reiniciou o runtime e preservou o trabalho local.
 - [x] Proteção HTTP testada: login local funcionou e requisições sem CSRF ou com origem local diferente receberam `403`.
 - [x] Recuperação de falhas testada: quedas forçadas separadamente no backend e no avatar reiniciaram o conjunto e restauraram o health check.
@@ -127,17 +127,20 @@ A Gideon pode parecer parte do Windows: iniciar com o login, não aparecer na ba
 - [x] **Transcrição Local** (`gideon/voz/ouvido.py`):
   - Captura contínua de microfone a 16 kHz via `sounddevice`
   - Detector de energia/silêncio (VAD) automático
-  - Transcrição ultra-rápida local com **Faster-Whisper** (`base`, int8, em português)
-  - Detecção textual de *"Gideon"* e variações depois que o Whisper transcreve a fala; ainda não é uma wake word acústica dedicada
-- [x] **Síntese Vocal Neural** (`gideon/voz/fala.py`):
+  - Captura contínua de microfone a 16 kHz via `sounddevice` com pré-buffer circular (~420ms), piso de ruído adaptativo, ganho automático para fala baixa e tolerância a pausas no meio da frase
+  - Transcrição ultra-rápida local com **Faster-Whisper** (`base`, int8, em português) com prompt de vocabulário contextual e filtro de alucinações de silêncio
+  - Reconhecimento amplo de ativação (*"Gideon"*, *"Olá, Gideon"*, *"Ei, Gideon"*, *"Oi, Gideon"*, *"Gideon, você está aí?"* e correspondência fonética aproximada)
+- [x] **Síntese Vocal Neural com Barge-In** (`gideon/voz/fala.py`):
   - Motor principal online `pt-BR-ThalitaMultilingualNeural`, com `pt-BR-FranciscaNeural` e Microsoft Maria como fallbacks
   - Análise da onda sonora (envelope RMS em tempo real) para controlar a abertura da boca
+  - Sistema de **Barge-In anti-eco**: permite interromper a fala da Gideon imediatamente ao falar por cima ou dizer *"Gideon, espera"*
   - Limpeza automática de marcações Markdown antes da fala
-  - Código de fallback Kokoro ONNX existe, mas os pesos locais ainda não estão instalados
-- [x] **Orquestrador Mãos-Livres** (`gideon/voz/orquestrador.py`):
-  - Ciclo completo: Ouve "Gideon" -> Materializa avatar -> Processa resposta -> Fala com boca mexendo -> Aguarda follow-up por 12s
+- [x] **Orquestrador Inteligente e 3 Modos de Escuta** (`gideon/voz/orquestrador.py` e `gideon/voz/comandos.py`):
+  - **Modo 1 (`ativacao_por_nome`)**, **Modo 2 (`conversa_continua`)** e **Modo 3 (`conversa_livre`)** configuráveis por voz ou API (`/api/voz/configurar`)
+  - Compreensão natural sem comandos rígidos (ex: *"abre o navegador pra mim"*, *"consegue abrir a internet?"*, *"quero entrar no Google"*, *"coloca alguma coisa do Chase Atlantic"*)
+  - Histórico contextual de sessão para perguntas encadeadas (ex: *"Quanto de memória RAM estou usando?"* -> *"E a placa de vídeo?"* reportando a **AMD Radeon RX 580 8 GB**)
 - [x] **Flag CLI `--voz`**: Inicia o servidor com o ouvinte mãos-livres ativo direto do terminal
-- [x] **Testes unitários básicos** (`testes/teste_voz.py`): regex da wake word, eventos e flags da API
+- [x] **Bateria de testes de voz avançada** (`testes/teste_voz.py`): 6 suítes aprovadas (wake word, NLU sem comandos rígidos, contexto Spotify/GPU, barge-in e modos de escuta)
 - [ ] **Portão real de voz**: falta medir microfone, ruído, TV, voz baixa, falsos positivos, latência e qualidade do TTS/lip sync
 
 ### Fase 4 · Módulos de Mãos e Segurança V/A/R (Parcial, Ainda Desconectada)

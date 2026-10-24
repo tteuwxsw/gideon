@@ -502,9 +502,40 @@ async def parar_voz(_: bool = Depends(autenticar)):
 
 @app.get("/api/voz/status")
 async def status_voz(_: bool = Depends(autenticar)):
-    """Retorna se o microfone mãos-livres está escutando."""
+    """Retorna o estado detalhado da escuta de voz, modo atual e sensibilidade."""
     orc = obter_orquestrador()
-    return {"status": "ok", "ativa": orc.ativo}
+    cfg = orc.obter_configuracao()
+    return {"status": "ok", **cfg}
+
+
+class ConfiguracaoVozRequisicao(BaseModel):
+    modo_escuta: str | None = None
+    duracao_sessao: float | None = None
+    sensibilidade: float | None = None
+    barge_in_ativo: bool | None = None
+    palavras_ativacao: list[str] | None = None
+
+
+@app.post("/api/voz/configurar")
+async def configurar_voz(req: ConfiguracaoVozRequisicao, _: bool = Depends(autenticar)):
+    """Configura modo de escuta (ativacao_por_nome, conversa_continua, conversa_livre), sensibilidade e sessão."""
+    orc = obter_orquestrador()
+    cfg = orc.configurar(
+        modo_escuta=req.modo_escuta,
+        duracao_sessao=req.duracao_sessao,
+        sensibilidade=req.sensibilidade,
+        barge_in_ativo=req.barge_in_ativo,
+        palavras_ativacao=req.palavras_ativacao,
+    )
+    return {"status": "ok", **cfg}
+
+
+@app.post("/api/voz/interromper")
+async def interromper_voz(_: bool = Depends(autenticar)):
+    """Interrompe imediatamente a fala atual da Gideon (Barge-In)."""
+    orc = obter_orquestrador()
+    interrompeu = orc.interromper_fala()
+    return {"status": "ok", "interrompida": interrompeu}
 
 
 # ─── Ponto de Entrada ─────────────────────────────────────────

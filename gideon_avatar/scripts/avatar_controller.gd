@@ -296,6 +296,14 @@ func _on_evento_recebido(tipo: String, dados: Dictionary) -> void:
             _energia_voz_alvo = float(dados.get("intensidade", 0.65))
         else:
             _energia_voz_alvo = 0.0
+    elif tipo == "ouvindo":
+        var ouvindo_ativo = bool(dados.get("ativo", false))
+        if ouvindo_ativo:
+            _olhar_alvo = Vector2.ZERO
+            _alvo_rotacao_cabeca = Vector3(deg_to_rad(1.2), 0.0, deg_to_rad(2.0))
+            _aplicar_blendshape("browInnerUp", 0.14)
+        else:
+            _aplicar_blendshape("browInnerUp", 0.04)
 
 
 func _on_emocao_alterada(nome: String, intensidade: float) -> void:
