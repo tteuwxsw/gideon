@@ -18,12 +18,10 @@ def instalar_inicializacao() -> bool:
         print(f"Erro: pythonw.exe não encontrado em {VENV_PYTHONW}")
         return False
 
-    script_servidor = ROOT_DIR / "gideon" / "servidor.py"
-
     # VBScript executa o comando com janela oculta (parâmetro 0)
     conteudo_vbs = f'''Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "{ROOT_DIR}"
-WshShell.Run """{VENV_PYTHONW}""" & " -m gideon.servidor --voz", 0, False
+WshShell.Run """{VENV_PYTHONW}""" & " -m gideon.supervisor", 0, False
 '''
 
     try:

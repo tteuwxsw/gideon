@@ -397,7 +397,7 @@
         <div class="brand-box">
             <div class="hologram-crest">G</div>
             <div class="brand-text">
-                <h1>Gideon <span class="version-tag">Hologram v0.2</span></h1>
+                <h1>Gideon <span class="version-tag">Hologram v0.3</span></h1>
                 <div class="status-indicators">
                     <span class="hud-pill"><span class="dot-live"></span> Cérebro: gemini-3.1-flash-lite</span>
                     <span class="hud-pill" id="avatar-ws-pill">⚪ Avatar: aguardando Godot</span>
@@ -433,21 +433,32 @@
     </footer>
 
     <script>
-        // Token de autenticação
-        const urlParams = new URLSearchParams(window.location.search);
-        let token = urlParams.get('token');
+        // O fragmento nao e enviado ao servidor nem aparece no access log.
+        const fragmentParams = new URLSearchParams(window.location.hash.slice(1));
+        let tokenInicial = fragmentParams.get('token') || localStorage.getItem('gideon_token');
 
-        if (token) {
-            localStorage.setItem('gideon_token', token);
-        } else {
-            token = localStorage.getItem('gideon_token');
-        }
-
-        if (!token) {
-            token = prompt("Informe o token local da Gideon (verifique o terminal):");
-            if (token) {
-                localStorage.setItem('gideon_token', token.trim());
+        async function prepararAutenticacao() {
+            const sessaoAtual = await fetch('/api/status');
+            if (sessaoAtual.ok) {
+                history.replaceState(null, '', window.location.pathname);
+                return true;
             }
+            if (!tokenInicial) {
+                tokenInicial = prompt("Informe o token local da Gideon:");
+            }
+            if (!tokenInicial) return false;
+
+            const resposta = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: tokenInicial.trim() })
+            });
+            if (!resposta.ok) return false;
+
+            localStorage.removeItem('gideon_token');
+            tokenInicial = null;
+            history.replaceState(null, '', window.location.pathname);
+            return true;
         }
 
         const chatTimeline = document.getElementById('chat-timeline');
@@ -473,9 +484,8 @@
 
         // Conexão WebSocket para telemetria em tempo real
         function iniciarWebSocket() {
-            if (!token) return;
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
+            const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
             
             try {
                 const ws = new WebSocket(wsUrl);
@@ -506,7 +516,10 @@
             }
         }
 
-        iniciarWebSocket();
+        prepararAutenticacao().then((ok) => {
+            if (ok) iniciarWebSocket();
+            else mostrarErro('Nao foi possivel autenticar o painel local.');
+        });
 
         // Ajuste automático do textarea
         campoTexto.addEventListener('input', () => {
@@ -528,7 +541,7 @@
             try {
                 const res = await fetch('/api/chat/limpar', {
                     method: 'POST',
-                    headers: { 'x-gideon-token': token }
+                    headers: { 'x-gideon-csrf': '1' }
                 });
                 if (res.ok) {
                     chatTimeline.innerHTML = `
@@ -587,14 +600,15 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'x-gideon-token': token || ''
+                        'Accept': 'text/event-stream',
+                        'x-gideon-csrf': '1'
                     },
                     body: JSON.stringify({ mensagem })
                 });
 
                 if (!response.ok) {
                     if (response.status === 401) {
-                        throw new Error("Token de segurança local inválido. Verifique o terminal para o link correto.");
+                        throw new Error("Sessão local inválida. Reabra o painel pelo comando da Gideon.");
                     }
                     throw new Error(`Servidor respondeu com código ${response.status}`);
                 }

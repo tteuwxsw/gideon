@@ -3,7 +3,6 @@
 import os
 import subprocess
 import time
-from pathlib import Path
 import psutil
 from typing import Any
 
@@ -107,47 +106,40 @@ def bloquear_estacao() -> str:
 
 
 def encerrar_gideon() -> str:
-    """Encerra completamente todos os processos, ouvidos e holograma da Gideon."""
+    """Solicita ao supervisor o encerramento dos componentes da Gideon."""
     import threading
+    from gideon.supervisor import sinalizar_parada, supervisor_ativo
+
+    if not supervisor_ativo():
+        return "O supervisor da Gideon não está ativo; o encerramento não foi iniciado."
 
     def _desligar():
-        time.sleep(2.0)
-        subprocess.run(["taskkill", "/F", "/IM", "Godot_v4.7.2-stable_win64.exe"], capture_output=True)
-        os._exit(0)
+        time.sleep(4.0)
+        sinalizar_parada()
 
     threading.Thread(target=_desligar, daemon=True).start()
     return "Encerrando todos os subsistemas da Gideon. Até logo, Henry."
 
 
 def atualizar_sistemas() -> dict[str, Any]:
-    """Puxa atualizações do Git e sincroniza as dependências da Gideon por voz."""
-    root_dir = Path(__file__).resolve().parent.parent.parent
-    try:
-        res_git = subprocess.run(["git", "pull"], capture_output=True, text=True, cwd=root_dir)
-        saida_git = (res_git.stdout + res_git.stderr).strip()
+    """Agenda a atualizacao fora do processo que esta usando os arquivos."""
+    import threading
+    from gideon.supervisor import sinalizar_atualizacao, supervisor_ativo
 
-        if "no tracking information" in saida_git.lower() or "no remote" in saida_git.lower():
-            return {
-                "atualizado": False,
-                "mensagem": "Nenhum repositório remoto configurado no Git ainda, Henry. Quando conectarmos ao seu GitHub, poderei baixar as novidades automaticamente.",
-            }
-
-        if "Already up to date" in saida_git or "Já está atualizado" in saida_git:
-            return {
-                "atualizado": False,
-                "mensagem": "Todos os subsistemas da Gideon já estão na versão mais recente, Henry.",
-            }
-
-        # Atualiza dependências locais com uv sync
-        subprocess.run(["uv", "sync"], capture_output=True, text=True, cwd=root_dir)
-
+    if not supervisor_ativo():
         return {
-            "atualizado": True,
-            "detalhes": saida_git[:120],
-            "mensagem": "Novas atualizações foram baixadas e integradas aos meus sistemas com sucesso, Henry.",
+            "atualizado": False,
+            "agendado": False,
+            "mensagem": "O supervisor nao esta ativo; a atualizacao nao foi iniciada.",
         }
-    except Exception as e:
-        return {"atualizado": False, "erro": str(e), "mensagem": f"Falha ao verificar atualizações: {str(e)}"}
+    timer = threading.Timer(8.0, sinalizar_atualizacao)
+    timer.daemon = True
+    timer.start()
+    return {
+        "atualizado": False,
+        "agendado": True,
+        "mensagem": "Atualizacao agendada; os componentes serao validados e reiniciados.",
+    }
 
 
 # ─── Registro das Ferramentas no Padrão do Portão de Risco ────
@@ -184,14 +176,14 @@ FERRAMENTAS_SISTEMA = [
     Ferramenta(
         nome="encerrar_gideon",
         descricao="Encerra e desliga completamente todos os processos e o holograma da Gideon quando o Henry pedir para fechar.",
-        risco=Risco.AMARELO,
+        risco=Risco.VERMELHO,
         executar=encerrar_gideon,
         frase=lambda **kwargs: "encerrar e fechar a Gideon completamente",
     ),
     Ferramenta(
         nome="atualizar_sistemas",
         descricao="Verifica o repositório Git e atualiza o código e dependências da Gideon quando o Henry pedir para se atualizar.",
-        risco=Risco.VERDE,
+        risco=Risco.VERMELHO,
         executar=atualizar_sistemas,
         frase=lambda **kwargs: "verificar e aplicar atualizações no repositório Git",
     ),

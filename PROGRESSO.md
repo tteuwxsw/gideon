@@ -3,11 +3,76 @@
 **Pessoa:** Henry  
 **Início:** 23/10/2026  
 **Evolução:** 24/10/2026 (Transição de Alfred para Gideon — Assistente Holográfica 3D inspirada em *The Flash*)  
-**Caminho:** B — Cérebro na nuvem (Gemini gratuito), mãos no computador, presença holográfica na tela  
+**Arquitetura atual:** Núcleo local no Windows + raciocínio Gemini na nuvem + avatar Godot local
 **Interface Visual:** Avatar 3D em Godot 4 (shader holográfico azul, expressões, overlay de desktop intangível ao mouse)  
-**Voz:** 100% Mãos-Livres (Faster-Whisper local + Síntese vocal + Wake Word "Gideon")  
+**Voz:** Protótipo mãos-livres (Faster-Whisper local + Edge TTS online + detecção textual de "Gideon")
 **Computador:** Windows  
-**Interação:** Holograma 3D e controle puramente por voz  
+**Interação desejada:** Holograma 3D e controle puramente por voz
+
+---
+
+## Estado real auditado em 24/10/2026
+
+> Esta seção substitui as classificações antigas de "concluído" quando houver conflito. A auditoria foi feita por leitura do código, do modelo GLB, dos scripts e do estado do Windows. Nesta sessão foram executados testes isolados e testes reais do runtime/HTTP; microfone, qualidade da voz, Gemini e memória de produção não foram exercitados.
+
+**Progresso estimado para a visão completa:** cerca de **45%**. O runtime integrado funciona, mas ainda não é um produto final instalado e o rosto continua provisório.
+
+| Área | Estado confirmado | O que falta |
+|---|---|---|
+| Chat Gemini | Implementado no painel web com streaming | Configuração de modelo, sessões isoladas e limite de contexto |
+| Memória SQLite | Implementada e usada no chat/voz | Backup, exportação, retenção, proteção de dados sensíveis e resumos automáticos |
+| Ouvido | Faster-Whisper local e detecção por energia implementados | Wake word acústica dedicada, calibração de ruído, testes reais de latência e falsos positivos |
+| Voz | Edge TTS online usa primeiro `pt-BR-ThalitaMultilingualNeural`; Francisca e Maria são fallbacks | Kokoro local não está ativo porque os pesos não existem; falta voz escolhida/configurável, fala por frase e interrupção |
+| Lip sync | A boca reage à intensidade RMS do áudio | Não há alinhamento fonético; apenas 4 visemas são animados por oscilações artificiais |
+| Rosto 3D | GLB válido do Ready Player Me com 72 morph targets | É um avatar feminino genérico, não se parece com a Gideon de *The Flash*; precisa de direção facial e modelo final próprio/licenciado |
+| Overlay Godot | Transparente, click-through e integrado por estilos Win32; removido da barra de tarefas e do Alt+Tab em teste real | Exportar executável próprio, validar múltiplos monitores e eliminar o sufixo DEBUG |
+| Ferramentas Windows | Atualização e encerramento estão ligados à voz por intenções determinísticas e confirmação; outras funções existem no catálogo | Function calling geral do Gemini ainda não está conectado |
+| Segurança V/A/R | Atualização/encerramento são vermelhos, token foi rotacionado, CSRF/origens foram protegidos e a parada cooperativa funciona | Sandbox de pastas, confirmação geral das demais ferramentas e limite de gasto ainda precisam ser corrigidos |
+| Inicialização no Windows | Supervisor silencioso inicia backend e avatar como um conjunto | O instalador ainda não foi executado e a tarefa de login ainda não foi registrada |
+| Instalação/atualização | Instalador PowerShell e atualizador conservador com candidato isolado e rollback implementados | Validar a instalação real depois de publicar esta versão no repositório privado |
+| Repositório | `tteuwxsw/gideon` confirmado como privado | Automatizar release/versionamento depois que existir um aplicativo instalável |
+
+### Problemas prioritários encontrados
+
+- [x] Remover o token local das URLs/logs, rotacionar o formato antigo e autenticar WebSocket por header ou cookie `HttpOnly`.
+- [x] Aplicar `WS_EX_TOOLWINDOW`/`WS_EX_NOACTIVATE` e remover `WS_EX_APPWINDOW`; resultado confirmado na janela real do Godot.
+- [ ] Exportar um executável próprio para substituir o runner do Godot e eliminar o modo DEBUG.
+- [x] Criar supervisor único com mutex, health check, PIDs próprios, encerramento cooperativo e reinício completo.
+- [ ] Conectar ferramentas ao cérebro por chamadas estruturadas somente depois de corrigir o portão de segurança, o `shell=True` e as permissões de arquivos.
+- [ ] Substituir o avatar Ready Player Me por um rosto final aprovado pelo Henry e documentar origem/licença.
+- [ ] Implementar lip sync fonético e usar os visemas reais do modelo.
+- [ ] Tornar a voz configurável e decidir entre voz online de alta qualidade, Kokoro local ou serviço premium.
+- [ ] Separar testes dos dados reais e criar testes de integração para voz, Godot, janela Windows, ferramentas e atualização.
+
+### Marco 0.3.0 · Runtime Windows e instalação por comando
+
+- [x] `gideon/supervisor.py`: inicia backend e avatar, impede duplicação e controla somente os processos da Gideon.
+- [x] Overlay testado com `TOOLWINDOW=true`, `NOACTIVATE=true` e `APPWINDOW=false`.
+- [x] Parada cooperativa testada: backend Uvicorn encerrou pela rota privada do supervisor e o avatar recebeu `WM_CLOSE`.
+- [x] Reinício automático testado: novos PIDs de supervisor, backend e avatar foram criados e o health check voltou a responder.
+- [x] Token antigo rotacionado; Godot conectou por header e nenhum token apareceu nos novos logs.
+- [x] `instalar_gideon.ps1`: instalação planejada em `%LOCALAPPDATA%\Programs\Gideon` e tarefa no login.
+- [x] `desinstalar_gideon.ps1`: remove a tarefa preservando memória por padrão.
+- [x] Atualizador exige repositório limpo, usa mutex, valida a versão candidata isoladamente, aplica somente `merge --ff-only`, sincroniza pelo lockfile e testa novamente.
+- [x] Comando falado de atualização conectado de forma determinística, com confirmação separada e reinício automático após sucesso.
+- [x] Identidade visual decidida: a meta é a aparência da Gideon de *The Flash* para uso pessoal; o GLB atual permanece explicitamente provisório.
+- [ ] Instalação no `%LOCALAPPDATA%` não executada nesta sessão, pois altera a inicialização do Windows e depende de esta versão estar publicada no GitHub.
+- [x] Ciclo de atualização testado com árvore modificada: recusou sobrescrever os arquivos, reiniciou o runtime e preservou o trabalho local.
+- [x] Proteção HTTP testada: login local funcionou e requisições sem CSRF ou com origem local diferente receberam `403`.
+- [x] Recuperação de falhas testada: quedas forçadas separadamente no backend e no avatar reiniciaram o conjunto e restauraram o health check.
+- [x] Versão candidata é testada em clone temporário; falha excepcional depois do merge restaura o commit anterior e sincroniza novamente o ambiente.
+
+### Direção de produto aprovada para discussão
+
+- **Gideon Core:** único núcleo de identidade, memória, permissões, ferramentas e roteamento de modelos.
+- **Gideon Presence:** presença de voz e holograma integrada ao Windows, sem barra de tarefas ou Alt+Tab e sem bloquear cliques.
+- **Gideon Workspace:** IDE opcional para projetos e tarefas complexas. O chat principal continua sendo a Gideon.
+- **Adaptadores de agentes:** OpenCode, Antigravity, APIs, CLIs e MCPs entram como especialistas que a Gideon pode acionar. Eles não recebem acesso total automaticamente; cada adaptador terá escopo, pasta, orçamento e auditoria próprios.
+- **Painel técnico:** permanece opcional e oculto no uso diário para diagnóstico, permissões, memória, custos e recuperação. A interface normal continua sendo a voz da Gideon.
+
+### Limite técnico importante
+
+A Gideon pode parecer parte do Windows: iniciar com o login, não aparecer na barra de tarefas nem no Alt+Tab, responder por voz e projetar o avatar quando chamada. Porém qualquer software em execução continuará visível no **Gerenciador de Tarefas**; tentar esconder o processo seria comportamento de malware e não faz parte do projeto.
 
 ---
 
@@ -42,7 +107,7 @@
 - [x] **Controlador de animações humanas** (`gideon_avatar/scripts/avatar_controller.gd`):
   - Micro-idle: piscar natural (3-6s), respiração sutil, micro-movimentos de olhar
   - Deslizamento suave com Tween cúbico ao trocar de posição na tela
-  - 5 modos de presença: Compacto, Conversa, Foco, Operacional, Oculto
+  - Modos funcionais: Compacto, Conversa, Foco e Oculto; Operacional está declarado, mas ainda não implementado
 - [x] **Cena base 3D** (`gideon_avatar/scenes/avatar.tscn`) com Bloom/Glow
 
 ### Fase 2 · Memória Permanente (Concluída)
@@ -58,30 +123,28 @@
   - Busca FTS5 por "reuniao" localiza "reunião"
   - Gideon cita a data em que a informação foi registrada (*"Conforme registrei em nossa conversa de hoje, 24/10/2026..."*)
 
-### Fase 5 · Subsistema de Voz Mãos-Livres (Concluída)
-- [x] **Ouvido Neural** (`gideon/voz/ouvido.py`):
+### Fase 5 · Subsistema de Voz Mãos-Livres (Protótipo Parcial)
+- [x] **Transcrição Local** (`gideon/voz/ouvido.py`):
   - Captura contínua de microfone a 16 kHz via `sounddevice`
   - Detector de energia/silêncio (VAD) automático
   - Transcrição ultra-rápida local com **Faster-Whisper** (`base`, int8, em português)
-  - Reconhecimento da palavra de chamada (*"Gideon"* e variações fonéticas)
-- [x] **Síntese Vocal Neural Humanizada** (`gideon/voz/fala.py`):
-  - Motor Neural HD principal (`pt-BR-ThalitaMultilingualNeural` e `pt-BR-FranciscaNeural` em 24 kHz) com entonação, respiração e cadência humanas
-  - Análise da onda sonora (envelope RMS em tempo real) para sincronia labial fiel no avatar 3D
+  - Detecção textual de *"Gideon"* e variações depois que o Whisper transcreve a fala; ainda não é uma wake word acústica dedicada
+- [x] **Síntese Vocal Neural** (`gideon/voz/fala.py`):
+  - Motor principal online `pt-BR-ThalitaMultilingualNeural`, com `pt-BR-FranciscaNeural` e Microsoft Maria como fallbacks
+  - Análise da onda sonora (envelope RMS em tempo real) para controlar a abertura da boca
   - Limpeza automática de marcações Markdown antes da fala
-  - Fallback automático para Kokoro ONNX e Microsoft Maria Desktop offline
+  - Código de fallback Kokoro ONNX existe, mas os pesos locais ainda não estão instalados
 - [x] **Orquestrador Mãos-Livres** (`gideon/voz/orquestrador.py`):
   - Ciclo completo: Ouve "Gideon" -> Materializa avatar -> Processa resposta -> Fala com boca mexendo -> Aguarda follow-up por 12s
 - [x] **Flag CLI `--voz`**: Inicia o servidor com o ouvinte mãos-livres ativo direto do terminal
-- [x] **Testes de Voz Aprovados** (`testes/teste_voz.py`):
-  - Extração de Wake Word: 100%
-  - Emissão de eventos para o avatar: 100%
-  - Controle de início/pausa via API: 100%
+- [x] **Testes unitários básicos** (`testes/teste_voz.py`): regex da wake word, eventos e flags da API
+- [ ] **Portão real de voz**: falta medir microfone, ruído, TV, voz baixa, falsos positivos, latência e qualidade do TTS/lip sync
 
-### Fase 4 · Mãos que Leem e Agem — Segurança V/A/R (Concluída)
+### Fase 4 · Módulos de Mãos e Segurança V/A/R (Parcial, Ainda Desconectada)
 - [x] **Portão de Risco e Auditoria** (`gideon/gate.py`):
   - Classificação formal de risco: Verde (leitura direta), Amarelo (reversível) e Vermelho (confirmação obrigatória)
   - Log permanente em formato JSONL (`dados/auditoria.jsonl`) registrando ferramenta, parâmetros, risco e resultado
-  - Botão de parada e controle de limite diário de gastos em USD
+  - Estruturas iniciais de parada e limite diário existem, mas ainda não cobrem cérebro, voz e todas as ferramentas
 - [x] **Ferramentas de Sistema** (`gideon/tools/sistema.py`):
   - Telemetria de hardware em tempo real: CPU, memória RAM usada/livre, espaço no disco C, bateria e uptime
   - Listagem dos aplicativos reais em execução no Windows (Discord, Spotify, Chrome, Steam, etc.)
@@ -89,45 +152,52 @@
   - Bloqueio instantâneo da tela do computador (`bloquear_estacao`)
 - [x] **Ferramentas de Arquivos** (`gideon/tools/arquivos.py`):
   - Listagem de diretórios do usuário (Downloads, Documentos, Desktop)
-  - Leitura segura de arquivos de texto e código com proteção rigorosa a segredos (`.env`, chaves e senhas)
+  - Leitura de texto com bloqueios básicos a nomes sensíveis; allowlist real de diretórios ainda pendente
   - Envio de arquivos para a Lixeira do Windows (`mover_para_lixeira`, sem exclusão destrutiva)
-- [x] **Integração Silenciosa com o Windows** (`gideon/integracao_windows.py`):
-  - Inicialização 100% oculta via `pythonw.exe` e VBScript no `shell:startup`
-  - Sem janela preta de terminal, sem ícone na barra de tarefas, pronta na inicialização do sistema
-- [x] **Portão da Fase 4 Aprovado** (`testes/teste_ferramentas.py`):
-  - Catálogo de 7 ferramentas validado
+- [x] **Base de Integração Silenciosa com o Windows** (`gideon/integracao_windows.py`):
+  - Supervisor executado com `pythonw.exe`, sem janela de terminal, controlando backend e avatar
+  - Estilos Win32 do avatar confirmados; tarefa automática no login ainda não registrada
+- [x] **Testes básicos de módulos** (`testes/teste_ferramentas.py`):
+  - Catálogo atual de 9 ferramentas carregado
   - Leitura real de telemetria do PC
   - Bloqueio de arquivos protegidos
   - Registro de auditoria no log permanente verificado
+- [ ] **Integração geral com conversa/voz**: atualização e encerramento funcionam por intenções determinísticas; o Gemini ainda não faz function calling para o restante do catálogo
+- [ ] **Portão de segurança completo**: confirmações reais, cancelamento, allowlist e limites ainda precisam ser implementados
 
 ---
 
 ## 🔜 O que falta fazer
 
-### Fase 3 · Rosto 3D da Gideon + Integração Godot 4 (Concluída)
+### Fase 3 · Rosto 3D da Gideon + Integração Godot 4 (Protótipo Parcial)
 - [x] **Godot Engine 4.7.2** instalado no Windows via WinGet oficial
-- [x] **Projeto `gideon_avatar/` validado**:
-  - Shader holográfico GLSL com Fresnel e scanlines compilado sem erros
-  - Cliente WebSocket conectando e autenticando via token local
+- [x] **Projeto `gideon_avatar/` criado**:
+  - Shader holográfico GLSL com Fresnel e scanlines
+  - Cliente WebSocket e controlador de blendshapes
   - Janela transparente sem bordas e intangível (`MOUSE_PASSTHROUGH = true`)
   - Sistema de tween cúbico para movimentação suave na tela
-- [x] **Launchers de um clique**:
-  - `iniciar_gideon.bat`: Acorda o cérebro em segundo plano e projeta o holograma 3D
-  - `parar_gideon.bat`: Encerra todos os processos de forma limpa
-  - `atualizar_gideon.bat`: Sincroniza o repositório e valida testes com um duplo clique
+- [x] Remover a janela do Alt+Tab e da barra de tarefas com integração Win32 real
+- [ ] Validar renderização, shader, expressões e múltiplos monitores em teste visual reproduzível
+- [x] **Launchers de protótipo**:
+  - `iniciar_gideon.bat`: inicia uma única instância do supervisor
+  - `parar_gideon.bat`: solicita encerramento cooperativo somente dos processos pertencentes à Gideon
+  - `atualizar_gideon.bat`: agenda atualização com os componentes parados e reinício automático
 - [x] **Repositório Privado no GitHub**:
-  - Código sincronizado em `https://github.com/tteuwxsw/gideon` (privado e seguro)
+  - Repositório `https://github.com/tteuwxsw/gideon` confirmado como privado
+  - Alterações da versão 0.3.0 ainda estão locais e não foram commitadas/publicadas nesta sessão
   - `origin/master` configurado para atualizações contínuas
-- [x] **Auto-Atualização por Voz**:
-  - Comando *"Gideon, atualize seus sistemas"* puxa melhorias do GitHub e sincroniza dependências sem intervenção manual
+- [x] **Auto-Atualização por Voz conectada**:
+  - Pedido e confirmação são reconhecidos de forma determinística; atualização roda fora do backend e reinicia o conjunto
+  - Falhas e árvore modificada são recusadas sem sobrescrever arquivos; falha pós-merge aciona restauração do commit anterior
 
 ---
 
 ## 🔜 O que falta fazer
 
 ### Fases 6–9 · Automações, Proatividade e Integrações
-- [x] Inicialização 100% oculta junto com o Windows (`gideon/integracao_windows.py` via `pythonw.exe`)
-- [x] **Rosto Feminino 3D Realista** (`gideon_avatar/modelos/gideon.glb`) instalado e integrado com **72 blendshapes** (52 ARKit + 15 Visemas Oculus), sacadas oculares vivas, piscar natural e shader holográfico que preserva olhos, íris e lábios
+- [ ] Inicialização completa junto com o Windows: supervisor já cobre backend e avatar, mas a tarefa no login depende da execução do instalador
+- [x] **Avatar feminino provisório** (`gideon_avatar/modelos/gideon.glb`) do Ready Player Me com 72 morph targets, piscar, olhar e shader holográfico
+- [ ] **Rosto definitivo da Gideon** com semelhança aprovada pelo Henry, maior realismo e licença documentada
 - [ ] Rotina matinal falada por horário com relógio de parede
 - [ ] Integração com WhatsApp / Telegram (áudio no bolso)
 - [ ] Encadeamento de automações (gatilhos e tarefas autônomas)
@@ -139,16 +209,17 @@
 | Decisão | Escolha | Motivo |
 |---|---|---|
 | Nome | **Gideon** | Escolha do Henry (inspirado em *The Flash*) |
-| Interação | **100% Voz Mãos-Livres** | Sem necessidade de teclado ou mouse no dia a dia |
+| Interação desejada | **100% Voz Mãos-Livres** | Sem necessidade de teclado ou mouse no dia a dia |
 | Transparência da Janela | `MOUSE_PASSTHROUGH = true` | Cliques do mouse atravessam o holograma; não atrapalha o uso do PC |
 | Cérebro | Google Gemini (`gemini-3.1-flash-lite`) | Raciocínio de ponta, custo gratuito e respostas rápidas |
 | Ouvido | Faster-Whisper (`base`, int8) | Transcrição local em português sem latência de rede |
-| Voz | Neural HD (`ThalitaMultilingualNeural` / `FranciscaNeural`) + Fallbacks | Voz feminina brasileira ultra-humanizada com lip-sync por onda sonora (RMS) |
-| Avatar 3D | Godot 4 + `gideon.glb` (72 Blendshapes) | Rosto feminino realista com shader holográfico azul, olhos vivos e visemas |
-| Formato do Rosto | `.glb` (ARKit + Oculus Visemes) | Padrão da indústria com sincronia labial multi-visema e piscar natural |
+| Voz atual | Edge TTS (`ThalitaMultilingualNeural`, depois `FranciscaNeural`) | Melhor que a voz nativa, mas online e ainda sem prosódia configurável |
+| Avatar 3D atual | Godot 4 + avatar provisório `gideon.glb` | Validar a tecnologia enquanto o rosto definitivo não é produzido |
+| Formato do Rosto | `.glb` com morph targets ARKit/Oculus | Suporta expressões; o uso fonético completo dos visemas ainda será implementado |
 | Memória | SQLite FTS5 Local | Fatos permanentes com busca insensível a acentos |
-| Segurança | Cofre do Windows (`keyring`) + Token Local | Chaves e comandos protegidos localmente |
+| Segurança | Cofre do Windows (`keyring`) + portão V/A/R + autenticação local sem token na URL | Base corrigida para runtime/update; sandbox de arquivos e function calling geral continuam pendentes |
+| IDE futura | **Gideon Workspace** com adaptadores | Gideon permanece como chat e identidade principal; outras IAs atuam como especialistas |
 
 ---
 
-*Atualizado em: 24/10/2026 02:12*
+*Atualizado em: 24/10/2026 — versão 0.3.0, runtime Windows supervisionado, autenticação corrigida e instalação por comando preparada.*

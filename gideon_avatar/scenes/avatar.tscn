@@ -27,12 +27,12 @@ height = 0.25
 
 [sub_resource type="Environment" id="Environment_glow"]
 background_mode = 0
-glow_enabled = true
-glow_levels/1 = 0.7
-glow_levels/2 = 0.5
-glow_intensity = 0.85
-glow_strength = 0.95
-glow_bloom = 0.18
+glow_enabled = false
+glow_levels/1 = 0.35
+glow_levels/2 = 0.2
+glow_intensity = 0.45
+glow_strength = 0.7
+glow_bloom = 0.04
 glow_blend_mode = 0
 
 [node name="GideonAvatar" type="Node3D" node_paths=PackedStringArray("ws_client", "mesh_avatar")]
@@ -47,7 +47,7 @@ script = ExtResource("2_ws_client")
 environment = SubResource("Environment_glow")
 
 [node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.015, 0.44)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.015, 0.8)
 fov = 38.0
 current = true
 

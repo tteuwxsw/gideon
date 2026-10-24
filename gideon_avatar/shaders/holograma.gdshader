@@ -6,21 +6,21 @@ uniform sampler2D textura_base : source_color, hint_default_white;
 uniform float preservar_detalhes_rosto : hint_range(0.0, 1.0) = 0.72;
 
 // Cores da projeção holográfica (Time Vault / STAR Labs)
-uniform vec4 cor_holograma : source_color = vec4(0.08, 0.68, 1.0, 0.92);
+uniform vec4 cor_holograma : source_color = vec4(0.06, 0.58, 0.95, 0.72);
 uniform vec4 cor_fresnel : source_color = vec4(0.35, 0.96, 1.0, 1.0);
-uniform float forca_fresnel : hint_range(0.5, 8.0) = 2.8;
+uniform float forca_fresnel : hint_range(0.5, 8.0) = 3.5;
 
 // Scanlines holográficas sutis de alta definição
 uniform float densidade_scanlines : hint_range(10.0, 600.0) = 260.0;
 uniform float velocidade_scanlines : hint_range(0.1, 10.0) = 1.4;
-uniform float intensidade_scanlines : hint_range(0.0, 1.0) = 0.14;
+uniform float intensidade_scanlines : hint_range(0.0, 1.0) = 0.09;
 
 // Pulso de energia vital
 uniform float velocidade_pulso : hint_range(0.0, 5.0) = 1.2;
-uniform float intensidade_pulso : hint_range(0.0, 0.5) = 0.05;
+uniform float intensidade_pulso : hint_range(0.0, 0.5) = 0.03;
 
 // Transparência e dissolução suave na base do pescoço
-uniform float opacidade_geral : hint_range(0.0, 1.0) = 0.94;
+uniform float opacidade_geral : hint_range(0.0, 1.0) = 0.68;
 uniform float corte_pescoco_min : hint_range(1.0, 1.7) = 1.43;
 uniform float corte_pescoco_max : hint_range(1.0, 1.7) = 1.49;
 
@@ -68,6 +68,6 @@ void fragment() {
     float alpha_final = clamp(mix(cor_holograma.a, 1.0, fresnel), 0.0, 1.0) * opacidade_geral * fade_pescoco * tex.a;
 
     ALBEDO = cor_final;
-    EMISSION = cor_final * 0.65 + (cor_fresnel.rgb * fresnel * 0.8);
+    EMISSION = cor_final * 0.3 + (cor_fresnel.rgb * fresnel * 0.4);
     ALPHA = alpha_final;
 }

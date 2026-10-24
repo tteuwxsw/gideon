@@ -1,28 +1,17 @@
 @echo off
-title Gideon - Atualizacao de Sistemas
-
-echo ========================================================
-echo           GIDEON - Atualizacao de Sistemas
-echo ========================================================
-echo.
-
 set "PROJECT_DIR=%~dp0"
-cd /d "%PROJECT_DIR%"
+set "PYTHON=%PROJECT_DIR%.venv\Scripts\python.exe"
 
-echo [1/3] Verificando atualizacoes no repositorio...
-git pull
+"%PYTHON%" -m gideon.supervisor --update
+if not errorlevel 1 exit /b 0
 
-echo.
-echo [2/3] Atualizando dependencias e pacotes...
-uv sync
+"%PYTHON%" -m gideon.supervisor --health
+if not errorlevel 1 (
+    echo [ERRO] Existe um backend da Gideon sem supervisor. Encerre-o antes de atualizar.
+    exit /b 1
+)
 
-echo.
-echo [3/3] Validando testes de seguranca...
-uv run python testes/teste_gideon.py
-
-echo.
-echo ========================================================
-echo   [OK] Gideon atualizada e pronta com sucesso!
-echo ========================================================
-echo.
-pause
+"%PYTHON%" -m gideon.atualizador
+if errorlevel 1 exit /b 1
+start "" "%PROJECT_DIR%.venv\Scripts\pythonw.exe" -m gideon.supervisor
+exit /b 0

@@ -155,7 +155,7 @@ class SintetizadorVoz:
         import sounddevice as sd
 
         parar_labios = threading.Event()
-        passo_segundos = 0.055  # Atualiza a boca ~18 vezes por segundo
+        passo_segundos = 0.033  # Atualiza a mandíbula ~30 vezes por segundo
         tamanho_janela = max(1, int(taxa * passo_segundos))
         total_amostras = len(amostras)
 
@@ -170,8 +170,8 @@ class SintetizadorVoz:
                 fatia = amostras[idx_atual : min(total_amostras, idx_atual + tamanho_janela)]
                 if len(fatia) > 0:
                     rms = float(np.sqrt(np.mean(np.square(fatia))))
-                    # Normaliza o RMS de fala humana (geralmente 0.02 a 0.25) para [0.0, 1.0]
-                    intensidade = min(1.0, max(0.0, (rms - 0.008) * 5.2))
+                    # Evita saturar a mandíbula em sílabas comuns.
+                    intensidade = min(1.0, max(0.0, (rms - 0.015) * 3.0))
                 else:
                     intensidade = 0.0
 

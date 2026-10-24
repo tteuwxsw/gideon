@@ -1,8 +1,8 @@
 class_name GideonAvatarController
 extends Node3D
 
-## Controlador principal do avatar holográfico 3D realista da Gideon.
-## Carrega a malha feminina com 72 blendshapes (ARKit + Oculus Visemes),
+## Controlador principal do avatar holográfico provisório da Gideon.
+## Carrega a malha feminina com blendshapes ARKit/Oculus,
 ## aplica o shader holográfico preservando olhos, lábios e feições,
 ## e gerencia micro-animações humanas (piscar, sacadas oculares, respiração e lip-sync).
 
@@ -66,11 +66,14 @@ func _ready() -> void:
 
 func _configurar_janela() -> void:
     # Janela 100% transparente, sem bordas, sempre visível e INTANGÍVEL (cliques passam direto)
+    get_window().transparent = true
+    get_viewport().transparent_bg = true
     var janela_id = DisplayServer.MAIN_WINDOW_ID
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_TRANSPARENT, true, janela_id)
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, true, janela_id)
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true, janela_id)
     DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_MOUSE_PASSTHROUGH, true, janela_id)
+    print("[Gideon Avatar] Transparência de janela suportada: ", DisplayServer.has_feature(DisplayServer.FEATURE_WINDOW_TRANSPARENCY))
 
 
 func _carregar_modelo_realista() -> void:
@@ -119,7 +122,10 @@ func _configurar_nos_modelo(no: Node) -> void:
         if nome_no in ["Wolf3D_Glasses", "Wolf3D_Outfit_Bottom", "Wolf3D_Outfit_Footwear", "Wolf3D_Body", "Wolf3D_Outfit_Top"]:
             no.visible = false
         else:
-            _aplicar_material_holografico(no)
+            # Olhos e dentes conservam o PBR original. Aplicar Fresnel emissivo
+            # nessas geometrias esféricas criava olhos em forma de anéis.
+            if nome_no not in ["EyeLeft", "EyeRight", "Wolf3D_Teeth"]:
+                _aplicar_material_holografico(no)
             if no.get_blend_shape_count() > 0:
                 _malhas_faciais.append(no)
 
@@ -138,36 +144,34 @@ func _aplicar_material_holografico(malha: MeshInstance3D) -> void:
         mat_holo.shader = _shader_holograma
 
         # Parâmetros padrão do holograma Time Vault
-        mat_holo.set_shader_parameter("cor_holograma", Color(0.08, 0.68, 1.0, 0.92))
+        mat_holo.set_shader_parameter("cor_holograma", Color(0.06, 0.58, 0.95, 0.72))
         mat_holo.set_shader_parameter("cor_fresnel", Color(0.35, 0.96, 1.0, 1.0))
-        mat_holo.set_shader_parameter("forca_fresnel", 2.8)
+        mat_holo.set_shader_parameter("forca_fresnel", 3.5)
         mat_holo.set_shader_parameter("densidade_scanlines", 260.0)
         mat_holo.set_shader_parameter("velocidade_scanlines", 1.4)
-        mat_holo.set_shader_parameter("intensidade_scanlines", 0.14)
-        mat_holo.set_shader_parameter("opacidade_geral", 0.94)
+        mat_holo.set_shader_parameter("intensidade_scanlines", 0.09)
+        mat_holo.set_shader_parameter("intensidade_pulso", 0.03)
+        mat_holo.set_shader_parameter("opacidade_geral", 0.68)
         mat_holo.set_shader_parameter("corte_pescoco_min", 1.43)
         mat_holo.set_shader_parameter("corte_pescoco_max", 1.49)
 
         # Preserva a textura realista dos olhos, íris, lábios e pele sob o feixe holográfico
         if mat_orig is BaseMaterial3D and mat_orig.albedo_texture:
             mat_holo.set_shader_parameter("textura_base", mat_orig.albedo_texture)
-            if malha.name in ["EyeLeft", "EyeRight"]:
-                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.88)
-                mat_holo.set_shader_parameter("opacidade_geral", 0.98)
-            elif malha.name == "Wolf3D_Hair":
+            if malha.name == "Wolf3D_Hair":
                 mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.55)
-                mat_holo.set_shader_parameter("opacidade_geral", 0.85)
+                mat_holo.set_shader_parameter("opacidade_geral", 0.58)
             else:
-                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.72)
+                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.66)
 
         malha.set_surface_override_material(i, mat_holo)
 
 
 func _aplicar_expressao_base() -> void:
     # Semblante sereno, vivo e acolhedor característico da Gideon
-    _aplicar_blendshape("mouthSmileLeft", 0.16)
-    _aplicar_blendshape("mouthSmileRight", 0.16)
-    _aplicar_blendshape("browInnerUp", 0.08)
+    _aplicar_blendshape("mouthSmileLeft", 0.08)
+    _aplicar_blendshape("mouthSmileRight", 0.08)
+    _aplicar_blendshape("browInnerUp", 0.04)
 
 
 func _input(_event: InputEvent) -> void:
@@ -210,9 +214,9 @@ func _atualizar_olhar_vivo(delta: float) -> void:
     _timer_sacada_olhos -= delta
     if _timer_sacada_olhos <= 0.0:
         _timer_sacada_olhos = randf_range(1.5, 4.0)
-        _olhar_alvo = Vector2(randf_range(-0.22, 0.22), randf_range(-0.15, 0.15))
+        _olhar_alvo = Vector2(randf_range(-0.06, 0.06), randf_range(-0.04, 0.04))
 
-    _olhar_atual = _olhar_atual.lerp(_olhar_alvo, delta * 8.0)
+    _olhar_atual = _olhar_atual.lerp(_olhar_alvo, delta * 5.0)
 
     var olhando_dir = max(0.0, _olhar_atual.x)
     var olhando_esq = max(0.0, -_olhar_atual.x)
@@ -253,25 +257,22 @@ func _atualizar_piscar(delta: float) -> void:
 func _atualizar_fala(delta: float) -> void:
     if _falando:
         _energia_voz = lerp(_energia_voz, _energia_voz_alvo, delta * 18.0)
-        # Combina a energia real da voz neural com articulação multi-visema natural
-        var mod_silaba = (sin(_tempo_acumulado * 15.0) + 1.0) * 0.5
-        var mod_vogal_o = (sin(_tempo_acumulado * 9.5 + 1.2) + 1.0) * 0.5
-        var mod_vogal_e = (cos(_tempo_acumulado * 12.0) + 1.0) * 0.5
-
-        var intensidade = clamp(_energia_voz if _energia_voz > 0.05 else mod_silaba * 0.65, 0.0, 1.0)
-        _abertura_boca = intensidade * 0.55
+        # Até existir alinhamento fonético, usa apenas a mandíbula. Empilhar
+        # jawOpen, mouthOpen e quatro visemas deformava lábios e dentes.
+        var intensidade = clamp(_energia_voz, 0.0, 1.0)
+        _abertura_boca = intensidade * 0.24
 
         _aplicar_blendshape("jawOpen", _abertura_boca)
-        _aplicar_blendshape("mouthOpen", _abertura_boca * 0.7)
-        _aplicar_blendshape("viseme_aa", intensidade * mod_silaba * 0.55)
-        _aplicar_blendshape("viseme_O", intensidade * mod_vogal_o * 0.38)
-        _aplicar_blendshape("viseme_E", intensidade * mod_vogal_e * 0.35)
-        _aplicar_blendshape("viseme_SS", intensidade * (1.0 - mod_silaba) * 0.25)
+        _aplicar_blendshape("mouthOpen", 0.0)
+        _aplicar_blendshape("viseme_aa", 0.0)
+        _aplicar_blendshape("viseme_O", 0.0)
+        _aplicar_blendshape("viseme_E", 0.0)
+        _aplicar_blendshape("viseme_SS", 0.0)
     else:
         _abertura_boca = lerp(_abertura_boca, 0.0, delta * 12.0)
         _energia_voz = lerp(_energia_voz, 0.0, delta * 12.0)
         _aplicar_blendshape("jawOpen", _abertura_boca)
-        _aplicar_blendshape("mouthOpen", _abertura_boca)
+        _aplicar_blendshape("mouthOpen", 0.0)
         _aplicar_blendshape("viseme_aa", 0.0)
         _aplicar_blendshape("viseme_O", 0.0)
         _aplicar_blendshape("viseme_E", 0.0)
@@ -294,7 +295,7 @@ func _on_evento_recebido(tipo: String, dados: Dictionary) -> void:
         if dados.has("intensidade"):
             _energia_voz_alvo = float(dados.get("intensidade", 0.65))
         else:
-            _energia_voz_alvo = randf_range(0.35, 0.85)
+            _energia_voz_alvo = 0.0
 
 
 func _on_emocao_alterada(nome: String, intensidade: float) -> void:
@@ -302,36 +303,48 @@ func _on_emocao_alterada(nome: String, intensidade: float) -> void:
     _intensidade_emocao = intensidade
     print("[Gideon Avatar] Expressando emoção: ", nome, " (intensidade: ", intensidade, ")")
 
+    _zerar_expressao_anterior()
     match nome:
         "amigavel", "satisfacao", "humor":
-            _aplicar_blendshape("mouthSmileLeft", 0.55 * intensidade)
-            _aplicar_blendshape("mouthSmileRight", 0.55 * intensidade)
-            _aplicar_blendshape("cheekSquintLeft", 0.3 * intensidade)
-            _aplicar_blendshape("cheekSquintRight", 0.3 * intensidade)
+            _aplicar_blendshape("mouthSmileLeft", 0.25 * intensidade)
+            _aplicar_blendshape("mouthSmileRight", 0.25 * intensidade)
+            _aplicar_blendshape("cheekSquintLeft", 0.12 * intensidade)
+            _aplicar_blendshape("cheekSquintRight", 0.12 * intensidade)
         "curiosidade", "duvida":
-            _aplicar_blendshape("browInnerUp", 0.65 * intensidade)
-            _aplicar_blendshape("browOuterUpRight", 0.45 * intensidade)
-            _alvo_rotacao_cabeca.z = deg_to_rad(5.0)
+            _aplicar_blendshape("browInnerUp", 0.28 * intensidade)
+            _aplicar_blendshape("browOuterUpRight", 0.2 * intensidade)
+            _alvo_rotacao_cabeca.z = deg_to_rad(3.0)
         "surpresa":
-            _aplicar_blendshape("eyeWideLeft", 0.7 * intensidade)
-            _aplicar_blendshape("eyeWideRight", 0.7 * intensidade)
-            _aplicar_blendshape("browInnerUp", 0.6 * intensidade)
+            _aplicar_blendshape("eyeWideLeft", 0.18 * intensidade)
+            _aplicar_blendshape("eyeWideRight", 0.18 * intensidade)
+            _aplicar_blendshape("browInnerUp", 0.35 * intensidade)
         "concentracao", "preocupacao":
-            _aplicar_blendshape("browDownLeft", 0.45 * intensidade)
-            _aplicar_blendshape("browDownRight", 0.45 * intensidade)
+            _aplicar_blendshape("browDownLeft", 0.25 * intensidade)
+            _aplicar_blendshape("browDownRight", 0.25 * intensidade)
         "neutra", _:
-            _aplicar_blendshape("mouthSmileLeft", 0.16)
-            _aplicar_blendshape("mouthSmileRight", 0.16)
-            _aplicar_blendshape("browInnerUp", 0.08)
+            _aplicar_blendshape("mouthSmileLeft", 0.08)
+            _aplicar_blendshape("mouthSmileRight", 0.08)
+            _aplicar_blendshape("browInnerUp", 0.04)
             _aplicar_blendshape("browDownLeft", 0.0)
             _aplicar_blendshape("browDownRight", 0.0)
             _aplicar_blendshape("eyeWideLeft", 0.0)
             _aplicar_blendshape("eyeWideRight", 0.0)
 
 
+func _zerar_expressao_anterior() -> void:
+    for nome in [
+        "mouthSmileLeft", "mouthSmileRight",
+        "cheekSquintLeft", "cheekSquintRight",
+        "browInnerUp", "browOuterUpRight",
+        "browDownLeft", "browDownRight",
+        "eyeWideLeft", "eyeWideRight",
+    ]:
+        _aplicar_blendshape(nome, 0.0)
+
+
 func _on_fala_iniciada(_texto: String) -> void:
     _falando = true
-    _energia_voz_alvo = 0.65
+    _energia_voz_alvo = 0.0
 
 
 func _on_fala_chunk(_texto: String) -> void:

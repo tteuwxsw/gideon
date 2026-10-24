@@ -1,17 +1,16 @@
 """Servidor local da Gideon (FastAPI + SSE streaming + WebSocket para avatar)."""
 
-import secrets
 import queue
+import os
+import secrets
 import threading
-import time
 from pathlib import Path
 from typing import AsyncGenerator
 from fastapi import (
-    FastAPI, Depends, HTTPException, Query, Header, Request, WebSocket,
+    FastAPI, Depends, HTTPException, Header, Request, WebSocket,
     WebSocketDisconnect, status,
 )
-from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -19,49 +18,53 @@ import json
 import asyncio
 
 from gideon.cerebro import Cerebro
+from gideon.auth import obter_ou_criar_token, token_valido
 from gideon.memoria import Memoria
 
 # Diretórios base
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DADOS_DIR = ROOT_DIR / "dados"
+DADOS_DIR = Path(os.environ.get("GIDEON_DATA_DIR", ROOT_DIR / "dados"))
 WEB_DIR = ROOT_DIR / "gideon" / "web"
 TOKEN_FILE = DADOS_DIR / "auth_token.txt"
+ORIGENS_LOCAIS = {"http://127.0.0.1:8000", "http://localhost:8000"}
 
 DADOS_DIR.mkdir(parents=True, exist_ok=True)
 WEB_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def obter_ou_criar_token() -> str:
-    """Garante a existência de um token de autenticação local no diretório dados/."""
-    if TOKEN_FILE.exists():
-        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
+TOKEN_LOCAL = obter_ou_criar_token(TOKEN_FILE)
 
-    novo_token = secrets.token_hex(16)
-    TOKEN_FILE.write_text(novo_token, encoding="utf-8")
-    return novo_token
-
-
-TOKEN_LOCAL = obter_ou_criar_token()
-
-app = FastAPI(title="Gideon — Assistente Pessoal", version="0.2.0")
+app = FastAPI(title="Gideon — Assistente Pessoal", version="0.3.0")
 
 # Restringe CORS estritamente à máquina local
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_origins=sorted(ORIGENS_LOCAIS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def proteger_requisicoes_web(request: Request, call_next):
+    """Impede que outras paginas locais usem o cookie da Gideon por CSRF."""
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origem = request.headers.get("origin")
+        if origem and origem not in ORIGENS_LOCAIS:
+            return JSONResponse({"detail": "Origem nao autorizada."}, status_code=403)
+        if request.cookies.get("gideon_token") and request.url.path != "/api/auth/login":
+            if request.headers.get("x-gideon-csrf") != "1":
+                return JSONResponse({"detail": "Protecao CSRF ausente."}, status_code=403)
+    return await call_next(request)
+
 # Estado em memória
 cerebro = Cerebro()
-memoria = Memoria()
+memoria = Memoria(DADOS_DIR / "memoria.db")
 historico_conversa: list[dict[str, str]] = []
 orquestrador_voz = None
 _loop_servidor = None
+_uvicorn_server = None
 
 # Conexões WebSocket ativas (avatar Godot e outros clientes)
 _clientes_ws: set[WebSocket] = set()
@@ -72,15 +75,12 @@ _lock_ws = asyncio.Lock()
 
 def autenticar(
     request: Request,
-    token_query: str | None = Query(None, alias="token"),
     x_gideon_token: str | None = Header(None, alias="x-gideon-token"),
 ) -> bool:
     """Verifica se o token fornecido confere com o token local."""
-    token_fornecido = x_gideon_token or token_query
-    if not token_fornecido:
-        token_fornecido = request.cookies.get("gideon_token")
+    token_fornecido = x_gideon_token or request.cookies.get("gideon_token")
 
-    if not token_fornecido or not secrets.compare_digest(token_fornecido, TOKEN_LOCAL):
+    if not token_valido(token_fornecido, TOKEN_LOCAL):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token local inválido ou ausente.",
@@ -124,7 +124,7 @@ class ModoRequisicao(BaseModel):
 # ─── Rotas HTTP ───────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
-async def index(token: str | None = None):
+async def index():
     """Serve a interface web do chat local."""
     html_path = WEB_DIR / "index.html"
     if not html_path.exists():
@@ -134,10 +134,48 @@ async def index(token: str | None = None):
         )
 
     conteudo = html_path.read_text(encoding="utf-8")
-    response = HTMLResponse(conteudo)
-    if token and secrets.compare_digest(token, TOKEN_LOCAL):
-        response.set_cookie(key="gideon_token", value=token, httponly=False, samesite="lax")
+    return HTMLResponse(conteudo)
+
+
+class LoginRequisicao(BaseModel):
+    token: str
+
+
+@app.post("/api/auth/login")
+async def login_local(req: LoginRequisicao):
+    """Troca o token inicial por um cookie local que JavaScript nao consegue ler."""
+    if not token_valido(req.token, TOKEN_LOCAL):
+        raise HTTPException(status_code=401, detail="Token local invalido.")
+
+    response = JSONResponse({"status": "ok"})
+    response.set_cookie(
+        key="gideon_token",
+        value=TOKEN_LOCAL,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+        max_age=86400,
+    )
     return response
+
+
+@app.get("/health")
+async def health():
+    """Health check local sem dados privados, usado pelo supervisor."""
+    return {"status": "ok"}
+
+
+@app.post("/api/runtime/shutdown")
+async def encerrar_runtime(x_gideon_runtime: str | None = Header(None)):
+    """Permite somente ao supervisor encerrar o backend cooperativamente."""
+    token_runtime = os.environ.get("GIDEON_RUNTIME_TOKEN")
+    if not token_runtime or not x_gideon_runtime or not secrets.compare_digest(
+        x_gideon_runtime, token_runtime
+    ):
+        raise HTTPException(status_code=403, detail="Supervisor invalido.")
+    if _uvicorn_server is not None:
+        _uvicorn_server.should_exit = True
+    return {"status": "encerrando"}
 
 
 @app.get("/api/status")
@@ -146,7 +184,7 @@ async def obter_status(_: bool = Depends(autenticar)):
     return {
         "status": "online",
         "nome": "Gideon",
-        "versao": "0.2.0",
+        "versao": "0.3.0",
         "modelo": cerebro.modelo,
         "mensagens_no_historico": len(historico_conversa),
         "clientes_ws": len(_clientes_ws),
@@ -367,10 +405,18 @@ async def definir_modo(req: ModoRequisicao, _: bool = Depends(autenticar)):
 # ─── WebSocket para o Avatar ──────────────────────────────────
 
 @app.websocket("/ws")
-async def websocket_avatar(websocket: WebSocket, token: str | None = Query(None)):
+async def websocket_avatar(websocket: WebSocket):
     """Conexão WebSocket bidirecional para o avatar (Godot) ou outros clientes."""
-    # Autentica
-    if not token or not secrets.compare_digest(token, TOKEN_LOCAL):
+    origem = websocket.headers.get("origin")
+    token_header = websocket.headers.get("x-gideon-token")
+    if origem and origem not in ORIGENS_LOCAIS:
+        await websocket.close(code=4003, reason="Origem nao autorizada")
+        return
+    if not origem and not token_header:
+        await websocket.close(code=4003, reason="Cliente nativo sem autenticacao")
+        return
+    token = token_header or websocket.cookies.get("gideon_token")
+    if not token_valido(token, TOKEN_LOCAL):
         await websocket.close(code=4001, reason="Token inválido")
         return
 
@@ -466,7 +512,7 @@ async def status_voz(_: bool = Depends(autenticar)):
 def main():
     """Inicia o servidor web local na porta 8000, restrito ao localhost."""
     import sys
-    global _loop_servidor
+    global _loop_servidor, _uvicorn_server
 
     # Quando executado via pythonw.exe (sem janela preta), redireciona stdout/stderr para log
     if sys.stdout is None or sys.stderr is None:
@@ -487,7 +533,6 @@ def main():
 
     ativar_voz_ao_iniciar = "--voz" in sys.argv
 
-    url = f"http://127.0.0.1:8000/?token={TOKEN_LOCAL}"
     print()
     print("  +------------------------------------------------------+")
     print("  |           GIDEON - Assistente Pessoal                |")
@@ -498,8 +543,7 @@ def main():
     if ativar_voz_ao_iniciar:
         print("  |  Voz Maos-Livres: ATIVA ('Gideon')                   |")
     print("  +------------------------------------------------------+")
-    print(f"  |  Acesse no navegador:                               |")
-    print(f"  |  {url}")
+    print("  |  Painel local: http://127.0.0.1:8000/               |")
     print("  +------------------------------------------------------+")
     print()
 
@@ -510,7 +554,14 @@ def main():
         if ativar_voz_ao_iniciar:
             obter_orquestrador().iniciar()
 
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_level="info")
+    @app.on_event("shutdown")
+    async def ao_encerrar():
+        if orquestrador_voz is not None and orquestrador_voz.ativo:
+            orquestrador_voz.parar()
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=8000, reload=False, log_level="info")
+    _uvicorn_server = uvicorn.Server(config)
+    _uvicorn_server.run()
 
 
 if __name__ == "__main__":

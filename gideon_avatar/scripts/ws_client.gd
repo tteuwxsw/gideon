@@ -40,12 +40,11 @@ func _carregar_token() -> void:
 
 
 func conectar_servidor() -> void:
-    var url_completa = url_servidor
     if not _token.is_empty():
-        url_completa += "?token=" + _token.uri_encode()
+        _socket.handshake_headers = PackedStringArray(["X-Gideon-Token: " + _token])
 
     print("[Gideon WS] Conectando a: ", url_servidor)
-    var err = _socket.connect_to_url(url_completa)
+    var err = _socket.connect_to_url(url_servidor)
     if err != OK:
         push_warning("[Gideon WS] Falha ao iniciar conexão: " + str(err))
 
@@ -59,7 +58,7 @@ func _process(delta: float) -> void:
             _conectado = true
             print("[Gideon WS] Conexão estabelecida com sucesso!")
             conectado.emit()
-            enviar_evento("pronto", {"cliente": "godot_avatar", "versao": "0.2.0"})
+            enviar_evento("pronto", {"cliente": "godot_avatar", "versao": "0.3.0"})
 
         while _socket.get_available_packet_count() > 0:
             var pacote = _socket.get_packet()

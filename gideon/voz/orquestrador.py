@@ -8,6 +8,8 @@ from typing import Callable, Any
 from gideon.cerebro import Cerebro
 from gideon.memoria import Memoria
 from gideon.protocolo import limpar_emocoes_texto, extrair_emocoes_texto
+from gideon.tools import obter_catalogo_ferramentas
+from gideon.voz.comandos import detectar_comando_sistema, resposta_confirmacao
 from gideon.voz.ouvido import OuvinteVoz
 from gideon.voz.fala import SintetizadorVoz
 
@@ -32,6 +34,9 @@ class OrquestradorVoz:
         self._parar_evento = threading.Event()
         self._em_conversa_ativa = False
         self._ultimo_contato = 0.0
+        self._catalogo = obter_catalogo_ferramentas()
+        self._confirmacao_pendente: str | None = None
+        self._confirmacao_expira_em = 0.0
 
     def _evento_interno(self, evento: dict) -> None:
         """Repassa eventos do ouvido/fala para o avatar WebSocket."""
@@ -103,6 +108,12 @@ class OrquestradorVoz:
                     self.sintetizador.falar("Sim, Henry?")
                     continue
 
+                resposta_sistema = self._processar_comando_sistema(comando)
+                if resposta_sistema:
+                    self.sintetizador.falar(resposta_sistema)
+                    self._ultimo_contato = time.time()
+                    continue
+
                 # 5. Processa o comando (Cérebro + Memória)
                 self._evento_interno({"tipo": "pensando", "ativo": True})
 
@@ -152,3 +163,42 @@ class OrquestradorVoz:
             except Exception as e:
                 print(f"  [Voz] Erro no laço de voz: {e}")
                 time.sleep(0.5)
+
+    def _processar_comando_sistema(self, comando: str) -> str | None:
+        """Confirma e executa somente comandos locais reconhecidos de forma exata."""
+        agora = time.time()
+        if self._confirmacao_pendente and agora > self._confirmacao_expira_em:
+            self._confirmacao_pendente = None
+
+        if self._confirmacao_pendente:
+            confirmacao = resposta_confirmacao(comando)
+            if confirmacao is None:
+                return "Preciso que você diga sim para confirmar ou não para cancelar."
+
+            ferramenta = self._confirmacao_pendente
+            self._confirmacao_pendente = None
+            if not confirmacao:
+                return "Ação cancelada, Henry."
+
+            resultado = self._catalogo.executar(
+                ferramenta,
+                {},
+                confirmar_fn=lambda _acao: True,
+                auto_amarelo=False,
+            )
+            if not resultado.get("ok"):
+                return str(resultado.get("motivo", "Não foi possível executar a ação."))
+            saida = resultado.get("saida")
+            if isinstance(saida, dict):
+                return str(saida.get("mensagem") or saida.get("erro") or "Ação concluída.")
+            return str(saida)
+
+        ferramenta = detectar_comando_sistema(comando)
+        if not ferramenta:
+            return None
+
+        self._confirmacao_pendente = ferramenta
+        self._confirmacao_expira_em = agora + 30.0
+        if ferramenta == "atualizar_sistemas":
+            return "Vou buscar e instalar código do seu repositório privado. Confirma a atualização?"
+        return "Vou encerrar o cérebro, a voz e o holograma da Gideon. Confirma?"

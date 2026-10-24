@@ -1,12 +1,11 @@
 @echo off
-title Gideon - Encerrando Sistemas
+set "PROJECT_DIR=%~dp0"
+set "PYTHON=%PROJECT_DIR%.venv\Scripts\python.exe"
 
-echo ========================================================
-echo   Encerrando processos da Gideon...
-echo ========================================================
-
-taskkill /F /IM Godot_v4.7.2-stable_win64.exe 2>nul
-wmic process where "commandline like '%%gideon.servidor%%'" delete 2>nul
-
-echo   [OK] Processos da Gideon encerrados.
-echo.
+"%PYTHON%" -m gideon.supervisor --stop
+if errorlevel 1 (
+    echo [AVISO] Nenhum supervisor da Gideon estava ativo.
+    exit /b 1
+)
+echo [OK] Encerramento cooperativo solicitado.
+exit /b 0
