@@ -468,22 +468,29 @@ def main():
     import sys
     global _loop_servidor
 
+    # Garante saída compatível com qualquer terminal Windows (CP1252 / UTF-8)
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     ativar_voz_ao_iniciar = "--voz" in sys.argv
 
     url = f"http://127.0.0.1:8000/?token={TOKEN_LOCAL}"
     print()
-    print("  ╔══════════════════════════════════════════════════════╗")
-    print("  ║           GIDEON — Assistente Pessoal                ║")
-    print("  ╠══════════════════════════════════════════════════════╣")
-    print(f"  ║  Servidor: 127.0.0.1:8000                           ║")
-    print(f"  ║  WebSocket: ws://127.0.0.1:8000/ws                  ║")
-    print(f"  ║  Modelo: {cerebro.modelo:<43}  ║")
+    print("  +------------------------------------------------------+")
+    print("  |           GIDEON - Assistente Pessoal                |")
+    print("  +------------------------------------------------------+")
+    print(f"  |  Servidor: 127.0.0.1:8000                           |")
+    print(f"  |  WebSocket: ws://127.0.0.1:8000/ws                  |")
+    print(f"  |  Modelo: {cerebro.modelo:<43}  |")
     if ativar_voz_ao_iniciar:
-        print("  ║  Voz Mãos-Livres: ATIVA ('Gideon')                   ║")
-    print("  ╠══════════════════════════════════════════════════════╣")
-    print(f"  ║  Acesse no navegador:                               ║")
-    print(f"  ║  {url}")
-    print("  ╚══════════════════════════════════════════════════════╝")
+        print("  |  Voz Maos-Livres: ATIVA ('Gideon')                   |")
+    print("  +------------------------------------------------------+")
+    print(f"  |  Acesse no navegador:                               |")
+    print(f"  |  {url}")
+    print("  +------------------------------------------------------+")
     print()
 
     @app.on_event("startup")
