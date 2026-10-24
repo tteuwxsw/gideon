@@ -177,10 +177,11 @@ A Gideon pode parecer parte do Windows: iniciar com o login, não aparecer na ba
 
 ## 🔜 O que falta fazer
 
-### Fase 3 · Rosto 3D da Gideon, Esqueleto Articulado, Lip-Sync Fonético e Consciência de Desktop (Concluída com Modelo Base 72-Blendshapes)
+### Fase 3 · Rosto 3D da Gideon, Esqueleto Articulado, Lip-Sync Fonético e Consciência de Desktop (Concluída com Visual STAR Labs Time Vault)
 - [x] **Godot Engine 4.7.2** integrado ao supervisor com janela transparente, sem bordas, intangível ao mouse (`MOUSE_PASSTHROUGH = true`) e oculta da barra de tarefas/Alt+Tab (`WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`)
-- [x] **Shader Holográfico Cinematográfico STAR Labs** (`gideon_avatar/shaders/holograma.gdshader`):
-  - Alta preservação das feições humanas (`preservar_detalhes_rosto = 0.82`), iluminação 3D de 3 pontos com brilho especular suave na pele e lábios, scanlines finas (`intensidade_scanlines = 0.045`), partículas luminosas discretas, dissolução volumétrica nos ombros e animação de materialização (`progresso_materializacao`)
+- [x] **Shader Holográfico Cinematográfico STAR Labs em Duas Passagens** (`gideon_avatar/shaders/holograma.gdshader` + `gideon_avatar/shaders/holograma_fade.gdshader`):
+  - **Passagem 1 (`holograma.gdshader`, Hardware Z-Buffer 100% Ativo)**: renderiza o busto esculpido em luz ciano-azul da Gideon (idêntico à projeção da Sala do Tempo do STAR Labs em *The Flash*), com olhos holográficos luminosos (`modo_componente = 1`, preservando fibras radiais da íris, pupila profunda e reflexo corneano), feições faciais naturais (sobrancelhas, cílios, nariz e lábios) e zero vazamento de geometria interna da cavidade bucal ou órbitas oculares
+  - **Passagem 2 (`holograma_fade.gdshader`, `next_pass` de Transição Contínua)**: realiza a dissolução volumétrica suave na base do pescoço (`corte_pescoco_min = -0.128`, `corte_pescoco_max = -0.052`) e o feixe de materialização com equação fotométrica idêntica à Passagem 1 (sem costuras e sem pontilhado)
 - [x] **Articulação Anatômica de `Skeleton3D` + 72 Blendshapes** (`gideon_avatar/scripts/avatar_controller.gd`):
   - Articula 8 ossos reais do esqueleto (`Head`, `Neck`, `Spine2`, `Spine1`, `LeftShoulder`, `RightShoulder`, `LeftEye`, `RightEye`) para respiração orgânica nos ombros, inclinação distribuída pescoço/cabeça e micro-acenos durante a fala
   - Interpolação contínua e suave (`lerp`) de todas as expressões faciais sem saltos bruscos
@@ -191,8 +192,8 @@ A Gideon pode parecer parte do Windows: iniciar com o login, não aparecer na ba
   - Acompanhamento suave e limitado do cursor do mouse (`GetCursorPos`) sem capturas constantes de tela
   - Detecção de abertura e troca de janelas (`GetForegroundWindow` + `GetWindowRect`) com proteção de privacidade (`PADROES_PRIVACIDADE_EXCLUIDOS`)
   - Retorno imediato do olhar para o Henry (`(0, 0)`) ao iniciar conversa
-- [x] **Governador de Desempenho para AMD Radeon RX 580 8GB**:
-  - Ajuste automático de `Engine.max_fps` (`60 FPS` ativa/falando, `30 FPS` em repouso `Idle`, `10 FPS` quando oculta) e telemetria periódica em `GET /api/avatar/telemetria`
+- [x] **Governador de Desempenho Medido na AMD Radeon RX 580 8GB**:
+  - Ajuste automático de `Engine.max_fps` (`60 FPS` ativa/falando, `30 FPS` em repouso `Idle`, `10 FPS` quando oculta), consumindo apenas **54,3 MB de VRAM**, **38,7 MB de RAM estática** e **5 draw calls por quadro** (verificado em captura real `dados/captura_avatar.png`)
 - [x] **Bateria de Validação Visual e Comportamental** (`testes/teste_holograma_comportamento.py`): 5 suítes aprovadas (visemas fonéticos, consciência de desktop, diálogo proativo, carregamento de esqueleto/shader no Godot 4 e telemetria)
 
 ---

@@ -1,110 +1,137 @@
 shader_type spatial;
-render_mode blend_mix, depth_prepass_alpha, cull_back, unshaded;
+render_mode depth_draw_always, cull_back, unshaded;
 
-// Textura original realista do modelo 3D (pele, poros, lábios, sobrancelhas, cabelo)
+// Passagem 1 (Hardware Z-Buffer 100% Ativo no Rosto, Crânio e Olhos):
+// Renderiza toda a região sólida do holograma (visibilidade >= 0.99) na fila opaca com
+// Z-buffer de hardware completo, eliminando qualquer vazamento da cavidade bucal ou órbitas
+// e sem nenhum pontilhado (dither). A faixa de transição suave do pescoço é desenhada na Passagem 2.
+
 uniform sampler2D textura_base : source_color, hint_default_white;
 uniform float preservar_detalhes_rosto : hint_range(0.0, 1.0) = 0.82;
+// 0 = Cabeça/Pele Holográfica (The Flash Time Vault), 1 = Olhos Luminosos, 2 = Dentes
+uniform int modo_componente : hint_range(0, 2) = 0;
 
-// Paleta STAR Labs / Time Vault (tons suaves de azul e ciano sem esconder o rosto)
-uniform vec4 cor_holograma : source_color = vec4(0.10, 0.64, 0.96, 0.86);
-uniform vec4 cor_fresnel : source_color = vec4(0.42, 0.95, 1.0, 1.0);
-uniform float forca_fresnel : hint_range(0.5, 8.0) = 3.2;
+uniform vec4 cor_holograma : source_color = vec4(0.10, 0.68, 0.98, 0.95);
+uniform vec4 cor_fresnel : source_color = vec4(0.55, 0.96, 1.0, 1.0);
+uniform float forca_fresnel : hint_range(0.5, 8.0) = 2.9;
 
-// Linhas de varredura (scanlines) muito sutis de alta definição
-uniform float densidade_scanlines : hint_range(50.0, 800.0) = 340.0;
+uniform float densidade_scanlines : hint_range(50.0, 800.0) = 380.0;
 uniform float velocidade_scanlines : hint_range(0.1, 10.0) = 1.1;
-uniform float intensidade_scanlines : hint_range(0.0, 0.5) = 0.045;
+uniform float intensidade_scanlines : hint_range(0.0, 0.5) = 0.042;
 
-// Pulso de energia vital e feixe volumétrico
-uniform float velocidade_pulso : hint_range(0.0, 5.0) = 1.1;
+uniform float velocidade_pulso : hint_range(0.0, 5.0) = 1.15;
 uniform float intensidade_pulso : hint_range(0.0, 0.3) = 0.022;
-uniform float intensidade_particulas : hint_range(0.0, 0.5) = 0.06;
-uniform float intensidade_distorcao : hint_range(0.0, 0.2) = 0.008;
+uniform float intensidade_particulas : hint_range(0.0, 0.5) = 0.055;
+uniform float intensidade_distorcao : hint_range(0.0, 0.2) = 0.006;
 
-// Transparência controlada, materialização e dissolução suave no busto/ombros
-uniform float opacidade_geral : hint_range(0.0, 1.0) = 0.84;
+uniform float opacidade_geral : hint_range(0.0, 1.0) = 0.96;
 uniform float progresso_materializacao : hint_range(0.0, 1.0) = 1.0;
-// Limites em espaço de mundo (o rosto fica em torno de y=0; o topo da cabeça em ~+0.2)
-uniform float corte_pescoco_min : hint_range(-1.0, 1.0) = -0.30;
-uniform float corte_pescoco_max : hint_range(-1.0, 1.0) = -0.14;
-uniform float topo_cabeca : hint_range(-1.0, 1.0) = 0.32;
+uniform float corte_pescoco_min : hint_range(-1.0, 1.0) = -0.128;
+uniform float corte_pescoco_max : hint_range(-1.0, 1.0) = -0.052;
+uniform float topo_cabeca : hint_range(-1.0, 1.0) = 0.22;
 
 varying float v_altura_local;
 varying vec3 v_pos_local;
 
 float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
+	p = fract(p * vec2(123.34, 456.21));
+	p += dot(p, p + 45.32);
+	return fract(p.x * p.y);
 }
 
 void vertex() {
-    // Altura em espaço de mundo: independe da escala/offset interno do GLB (Ready Player Me usa nós escalados)
-    v_altura_local = (MODEL_MATRIX * vec4(VERTEX, 1.0)).y;
-    v_pos_local = VERTEX;
+	v_altura_local = (MODEL_MATRIX * vec4(VERTEX, 1.0)).y;
+	v_pos_local = VERTEX;
 
-    // Micro-distorção eletrônica ocasional e extremamente sutil
-    float gatilho_glitch = step(0.992, sin(TIME * 3.7) * cos(TIME * 2.3));
-    float desvio_x = sin(VERTEX.y * 45.0 + TIME * 24.0) * intensidade_distorcao * gatilho_glitch * 0.015;
-    VERTEX.x += desvio_x;
+	float gatilho_glitch = step(0.994, sin(TIME * 3.7) * cos(TIME * 2.3));
+	float desvio_x = sin(VERTEX.y * 45.0 + TIME * 24.0) * intensidade_distorcao * gatilho_glitch * 0.012;
+	VERTEX.x += desvio_x;
 }
 
 void fragment() {
-    // 1. Leitura da textura humana realista (pele, contorno labial, sobrancelhas, cílios)
-    vec4 tex = texture(textura_base, UV);
-    float luminancia = dot(tex.rgb, vec3(0.299, 0.587, 0.114));
-    float contraste_facial = smoothstep(0.04, 0.96, luminancia);
+	float limite_mat = mix(corte_pescoco_min - 0.05, topo_cabeca, progresso_materializacao);
+	float fade_busto = smoothstep(corte_pescoco_min, corte_pescoco_max, v_altura_local);
+	float fade_materializacao = 1.0 - smoothstep(limite_mat - 0.05, limite_mat + 0.015, v_altura_local);
+	float visibilidade = fade_busto * fade_materializacao;
 
-    // 2. Iluminação 3D realista de 3 pontos (Key Light + Fill Light + Specular suave na pele/lábios)
-    vec3 dir_key = normalize(vec3(0.22, 0.38, 0.89));
-    vec3 dir_fill = normalize(vec3(-0.45, 0.15, 0.65));
-    float diff_key = clamp(dot(NORMAL, dir_key), 0.0, 1.0);
-    float diff_fill = clamp(dot(NORMAL, dir_fill), 0.0, 1.0) * 0.35;
-    float sombreamento_3d = mix(0.54, 1.18, clamp(diff_key + diff_fill, 0.0, 1.0));
+	// A região de fade suave na base do pescoço (< 0.998) é delegada à Passagem 2 (blend_mix suave)
+	if (visibilidade < 0.998) {
+		discard;
+	}
 
-    // Brilho especular suave para dar vida à pele, nariz, maçãs do rosto e lábios
-    vec3 half_vec = normalize(dir_key + VIEW);
-    float spec = pow(clamp(dot(NORMAL, half_vec), 0.0, 1.0), 28.0) * 0.16;
+	vec4 tex = texture(textura_base, UV);
+	float luminancia = dot(tex.rgb, vec3(0.299, 0.587, 0.114));
 
-    // 3. Efeito Fresnel (bordas levemente iluminadas em ciano)
-    float dot_vn = clamp(dot(VIEW, NORMAL), 0.0, 1.0);
-    float fresnel = pow(1.0 - dot_vn, forca_fresnel);
+	vec3 dir_key = normalize(vec3(0.18, 0.34, 0.92));
+	vec3 dir_fill = normalize(vec3(-0.38, 0.20, 0.78));
+	float diff_key = clamp(dot(NORMAL, dir_key), 0.0, 1.0);
+	float diff_fill = clamp(dot(NORMAL, dir_fill), 0.0, 1.0) * 0.45;
+	float sombreamento_3d = mix(0.54, 1.15, clamp(diff_key + diff_fill, 0.0, 1.0));
 
-    // 4. Linhas de varredura (scanlines) muito sutis
-    float scanline = sin((SCREEN_UV.y * densidade_scanlines) + (TIME * velocidade_scanlines));
-    scanline = mix(1.0 - intensidade_scanlines, 1.0, (scanline + 1.0) * 0.5);
+	vec3 half_vec = normalize(dir_key + VIEW);
+	float spec = pow(clamp(dot(NORMAL, half_vec), 0.0, 1.0), 30.0) * 0.22;
 
-    // 5. Pequenas partículas luminosas ascendentes discretas nas bordas
-    vec2 grade_part = floor(vec2(UV.x * 55.0, (UV.y - TIME * 0.06) * 55.0));
-    float semente_part = hash21(grade_part);
-    float particula = step(0.986, semente_part) * fresnel * intensidade_particulas;
+	float dot_vn = clamp(dot(VIEW, NORMAL), 0.0, 1.0);
+	float fresnel = pow(1.0 - dot_vn, forca_fresnel);
 
-    // 6. Feixe de projeção volumétrica simulada na base dos ombros/pescoço
-    float feixe_vertical = 0.88 + 0.12 * sin(v_pos_local.x * 38.0 + TIME * 1.5);
+	float scanline = sin((SCREEN_UV.y * densidade_scanlines) + (TIME * velocidade_scanlines));
+	scanline = mix(1.0 - intensidade_scanlines, 1.0, (scanline + 1.0) * 0.5);
 
-    // 7. Equilíbrio entre realismo humano e projeção holográfica azul/ciano de The Flash
-    vec3 base_holografica = cor_holograma.rgb * mix(0.42, 1.28, contraste_facial) * sombreamento_3d;
-    vec3 pele_holografica = tex.rgb * vec3(0.76, 0.96, 1.16) * sombreamento_3d + vec3(spec * 0.65, spec * 0.90, spec);
-    vec3 rosto_realista = mix(base_holografica, pele_holografica, preservar_detalhes_rosto);
+	vec3 cor_final;
 
-    float pulso = sin(TIME * velocidade_pulso) * intensidade_pulso;
-    vec3 cor_final = mix(rosto_realista, cor_fresnel.rgb, fresnel * 0.52) * scanline * feixe_vertical;
-    cor_final += cor_fresnel.rgb * (pulso + particula);
+	if (modo_componente == 1) {
+		// OLHOS HOLOGRÁFICOS EXPRESSIVOS (Íris ciano-luminosa detalhada, pupila profunda e reflexo corneano)
+		float dist_centro = distance(UV, vec2(0.5, 0.5));
+		float mascara_iris = 1.0 - smoothstep(0.18, 0.215, dist_centro);
+		float mascara_pupila = 1.0 - smoothstep(0.065, 0.088, dist_centro);
+		float reflexo_cornea = smoothstep(0.58, 0.88, luminancia) * mascara_iris;
 
-    // 8. Dissolução volumétrica no busto e animação de materialização
-    float fade_busto = smoothstep(corte_pescoco_min, corte_pescoco_max, v_altura_local);
-    float limite_mat = mix(corte_pescoco_min - 0.05, topo_cabeca, progresso_materializacao);
-    float fade_materializacao = 1.0 - smoothstep(limite_mat - 0.06, limite_mat + 0.02, v_altura_local);
-    float borda_materializacao = smoothstep(limite_mat - 0.04, limite_mat, v_altura_local) * fade_materializacao;
-    cor_final += cor_fresnel.rgb * borda_materializacao * 0.85;
+		vec3 esclera_holo = mix(vec3(0.18, 0.65, 0.94), vec3(0.62, 0.94, 1.0), clamp(sombreamento_3d * 0.85, 0.0, 1.0));
+		float fibras_iris = clamp((luminancia - 0.08) * 2.6, 0.0, 1.0);
+		vec3 iris_holo = mix(vec3(0.03, 0.36, 0.72), vec3(0.42, 0.96, 1.0), fibras_iris);
+		vec3 pupila_holo = vec3(0.01, 0.07, 0.16);
 
-    float alpha_final = clamp(mix(cor_holograma.a, 0.98, fresnel * 0.6), 0.0, 1.0)
-        * opacidade_geral
-        * fade_busto
-        * fade_materializacao
-        * tex.a;
+		vec3 olho_base = mix(esclera_holo, iris_holo, mascara_iris);
+		olho_base = mix(olho_base, pupila_holo, mascara_pupila * (1.0 - reflexo_cornea));
+		olho_base += vec3(0.88, 0.99, 1.0) * (reflexo_cornea * 0.95 + spec * 1.4);
+		cor_final = olho_base * scanline;
+	} else if (modo_componente == 2) {
+		cor_final = mix(cor_holograma.rgb * 0.50, cor_fresnel.rgb * 0.82, clamp(luminancia, 0.0, 1.0)) * sombreamento_3d;
+	} else {
+		// CABEÇA E BUSTO ESCULPIDO DE LUZ (GIDEON - THE FLASH / STAR LABS TIME VAULT)
+		vec2 uv_rosto = (UV - vec2(0.50, 0.385)) / vec2(0.19, 0.165);
+		float mascara_feicoes = 1.0 - smoothstep(0.68, 0.98, length(uv_rosto));
 
-    ALBEDO = cor_final;
-    EMISSION = cor_final * 0.24 + (cor_fresnel.rgb * fresnel * 0.30);
-    ALPHA = alpha_final;
+		float lum_pele_lisa = 0.72;
+		float lum_efetiva = mix(lum_pele_lisa, luminancia, mascara_feicoes);
+
+		vec2 uv_labios = (UV - vec2(0.50, 0.485)) / vec2(0.085, 0.042);
+		float mascara_labios = 1.0 - smoothstep(0.55, 1.0, length(uv_labios));
+
+		vec3 tom_esculpido = mix(
+			vec3(0.04, 0.34, 0.66),
+			vec3(0.34, 0.87, 1.0),
+			smoothstep(0.12, 0.88, lum_efetiva)
+		);
+		tom_esculpido = mix(tom_esculpido, tom_esculpido * vec3(0.76, 0.88, 1.08), mascara_labios * 0.42);
+
+		vec3 pele_holografica = mix(
+			cor_holograma.rgb * 0.78,
+			tom_esculpido,
+			preservar_detalhes_rosto
+		) * sombreamento_3d + vec3(spec * 0.55, spec * 0.92, spec * 1.15);
+
+		vec2 grade_part = floor(vec2(UV.x * 55.0, (UV.y - TIME * 0.06) * 55.0));
+		float semente_part = hash21(grade_part);
+		float particula = step(0.988, semente_part) * fresnel * intensidade_particulas;
+
+		float feixe_vertical = 0.92 + 0.08 * sin(v_pos_local.x * 36.0 + TIME * 1.4);
+		float pulso = sin(TIME * velocidade_pulso) * intensidade_pulso;
+
+		cor_final = mix(pele_holografica, cor_fresnel.rgb, fresnel * 0.50) * scanline * feixe_vertical;
+		cor_final += cor_fresnel.rgb * (pulso + particula);
+	}
+
+	ALBEDO = cor_final;
+	EMISSION = cor_final * 0.28 + (cor_fresnel.rgb * fresnel * 0.26);
 }

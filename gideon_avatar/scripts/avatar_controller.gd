@@ -25,11 +25,13 @@ var _nome_estado_ia: String = "idle"
 # Malhas faciais, materiais holográficos e esqueleto anatômico
 var _malhas_faciais: Array[MeshInstance3D] = []
 var _materiais_holograma: Array[ShaderMaterial] = []
+var _malha_cabelo: MeshInstance3D = null
 var _pivo_cabeca: Node3D = null
 var _esqueleto: Skeleton3D = null
 var _ossos_idx: Dictionary = {}
 var _ossos_rest: Dictionary = {}
 var _shader_holograma: Shader = preload("res://shaders/holograma.gdshader")
+var _shader_fade: Shader = preload("res://shaders/holograma_fade.gdshader")
 
 # Governador de desempenho (RX 580 8GB: 60 FPS ativo, 30 FPS em repouso, 10 FPS oculto)
 var _fps_ativo: int = 60
@@ -211,12 +213,16 @@ func _configurar_nos_modelo(no: Node) -> void:
 
     if no is MeshInstance3D:
         var nome_no = no.name
-        # Oculta óculos, roupa e parte inferior; o busto termina em fade volumétrico no pescoço/ombros
-        if nome_no in ["Wolf3D_Glasses", "Wolf3D_Outfit_Bottom", "Wolf3D_Outfit_Footwear", "Wolf3D_Outfit_Top"]:
+        # Na série The Flash (STAR Labs Time Vault), a Gideon é um busto holográfico feminino
+        # esculpido em luz ciano pura (sem óculos, sem camiseta e sem mechas poligonais sobre a testa).
+        if nome_no in ["Wolf3D_Glasses", "Wolf3D_Body", "Wolf3D_Outfit_Bottom", "Wolf3D_Outfit_Footwear", "Wolf3D_Outfit_Top"]:
+            no.visible = false
+        elif nome_no == "Wolf3D_Hair":
+            _malha_cabelo = no
+            _aplicar_material_holografico(no)
             no.visible = false
         else:
-            if nome_no not in ["EyeLeft", "EyeRight", "Wolf3D_Teeth"]:
-                _aplicar_material_holografico(no)
+            _aplicar_material_holografico(no)
             if no.get_blend_shape_count() > 0:
                 _malhas_faciais.append(no)
 
@@ -228,35 +234,53 @@ func _aplicar_material_holografico(malha: MeshInstance3D) -> void:
     if not malha.mesh:
         return
 
+    var nome_malha = malha.name
     var qtd_superficies = malha.mesh.get_surface_count()
     for i in range(qtd_superficies):
         var mat_orig = malha.mesh.surface_get_material(i)
         var mat_holo = ShaderMaterial.new()
         mat_holo.shader = _shader_holograma
 
-        mat_holo.set_shader_parameter("cor_holograma", Color(0.10, 0.64, 0.96, 0.86))
-        mat_holo.set_shader_parameter("cor_fresnel", Color(0.42, 0.95, 1.0, 1.0))
-        mat_holo.set_shader_parameter("forca_fresnel", 3.2)
-        mat_holo.set_shader_parameter("densidade_scanlines", 340.0)
+        mat_holo.set_shader_parameter("cor_holograma", Color(0.10, 0.68, 0.98, 0.92))
+        mat_holo.set_shader_parameter("cor_fresnel", Color(0.52, 0.96, 1.0, 1.0))
+        mat_holo.set_shader_parameter("forca_fresnel", 2.8)
+        mat_holo.set_shader_parameter("densidade_scanlines", 380.0)
         mat_holo.set_shader_parameter("velocidade_scanlines", 1.1)
-        mat_holo.set_shader_parameter("intensidade_scanlines", 0.045)
-        mat_holo.set_shader_parameter("intensidade_pulso", 0.022)
-        mat_holo.set_shader_parameter("intensidade_particulas", 0.06)
-        mat_holo.set_shader_parameter("intensidade_distorcao", 0.008)
+        mat_holo.set_shader_parameter("intensidade_scanlines", 0.04)
+        mat_holo.set_shader_parameter("intensidade_pulso", 0.02)
+        mat_holo.set_shader_parameter("intensidade_particulas", 0.05)
+        mat_holo.set_shader_parameter("intensidade_distorcao", 0.006)
         mat_holo.set_shader_parameter("opacidade_geral", _opacidade_usuario)
         mat_holo.set_shader_parameter("progresso_materializacao", _progresso_materializacao)
-        mat_holo.set_shader_parameter("corte_pescoco_min", -0.30)
-        mat_holo.set_shader_parameter("corte_pescoco_max", -0.14)
-        mat_holo.set_shader_parameter("topo_cabeca", 0.32)
+        mat_holo.set_shader_parameter("corte_pescoco_min", -0.128)
+        mat_holo.set_shader_parameter("corte_pescoco_max", -0.052)
+        mat_holo.set_shader_parameter("topo_cabeca", 0.22)
+
+        if nome_malha in ["EyeLeft", "EyeRight"]:
+            mat_holo.set_shader_parameter("modo_componente", 1)
+            mat_holo.set_shader_parameter("forca_fresnel", 4.5)
+        elif nome_malha == "Wolf3D_Teeth":
+            mat_holo.set_shader_parameter("modo_componente", 2)
+        else:
+            mat_holo.set_shader_parameter("modo_componente", 0)
 
         if mat_orig is BaseMaterial3D and mat_orig.albedo_texture:
             mat_holo.set_shader_parameter("textura_base", mat_orig.albedo_texture)
-            if malha.name == "Wolf3D_Hair":
-                # Cabelo desenhado ANTES do rosto: a pele (quase opaca) cobre as mechas de trás
-                mat_holo.render_priority = -1
-                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.70)
-            else:
-                mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.74)
+            mat_holo.set_shader_parameter("preservar_detalhes_rosto", 0.82)
+
+        if nome_malha == "Wolf3D_Head":
+            var mat_fade = ShaderMaterial.new()
+            mat_fade.shader = _shader_fade
+            mat_fade.set_shader_parameter("cor_holograma", Color(0.10, 0.68, 0.98, 0.95))
+            mat_fade.set_shader_parameter("cor_fresnel", Color(0.55, 0.96, 1.0, 1.0))
+            mat_fade.set_shader_parameter("forca_fresnel", 2.9)
+            mat_fade.set_shader_parameter("opacidade_geral", _opacidade_usuario)
+            mat_fade.set_shader_parameter("progresso_materializacao", _progresso_materializacao)
+            mat_fade.set_shader_parameter("corte_pescoco_min", -0.128)
+            mat_fade.set_shader_parameter("corte_pescoco_max", -0.052)
+            mat_fade.set_shader_parameter("topo_cabeca", 0.22)
+            mat_holo.next_pass = mat_fade
+            _materiais_holograma.append(mat_fade)
 
         malha.set_surface_override_material(i, mat_holo)
         _materiais_holograma.append(mat_holo)
