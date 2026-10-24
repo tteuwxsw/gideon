@@ -275,6 +275,7 @@ def executar() -> int:
 
     try:
         DADOS_DIR.mkdir(parents=True, exist_ok=True)
+        RUNTIME_FILE.unlink(missing_ok=True)
         # Trunca logs antigos para nao preservar tokens que versões anteriores
         # colocavam acidentalmente em URLs.
         log_handle = COMPONENT_LOG_FILE.open("w", encoding="utf-8", buffering=1)
@@ -293,13 +294,13 @@ def executar() -> int:
             stderr=log_handle,
             creationflags=flags,
         )
-        limite = time.monotonic() + 30
+        limite = time.monotonic() + 90
         while time.monotonic() < limite and not _backend_ativo():
             if backend.poll() is not None:
                 raise RuntimeError("O backend da Gideon encerrou durante a inicializacao.")
             time.sleep(0.25)
         if not _backend_ativo():
-            raise RuntimeError("O backend nao respondeu ao health check em 30 segundos.")
+            raise RuntimeError("O backend nao respondeu ao health check em 90 segundos.")
 
         executavel_avatar, exportado = _localizar_godot()
         if not executavel_avatar:
@@ -314,7 +315,7 @@ def executar() -> int:
             stderr=log_handle,
         )
 
-        limite_estilo = time.monotonic() + 20
+        limite_estilo = time.monotonic() + 35
         estabilizado_desde: float | None = None
         while time.monotonic() < limite_estilo and avatar.poll() is None:
             if aplicar_estilo_overlay(avatar.pid):
@@ -401,6 +402,8 @@ def executar() -> int:
         if backend:
             _solicitar_parada_backend(token_runtime)
             _encerrar_processo(backend)
+        if backend is not None and not isinstance(erro, FileNotFoundError):
+            return SAIR_BACKEND_FALHOU
         return 1
     finally:
         RUNTIME_FILE.unlink(missing_ok=True)
@@ -413,12 +416,14 @@ def executar() -> int:
 def main() -> int:
     if "--stop" in sys.argv:
         return 0 if sinalizar_parada() else 1
+    if "--restart" in sys.argv:
+        return 0 if sinalizar_reinicio() else 1
     if "--update" in sys.argv:
         return 0 if sinalizar_atualizacao() else 1
     if "--health" in sys.argv:
         return 0 if _backend_ativo() else 1
     if "--delayed-start" in sys.argv:
-        time.sleep(2)
+        time.sleep(3)
     resultado = executar()
     if resultado in {SAIR_REINICIANDO, SAIR_BACKEND_FALHOU}:
         reinicios = int(os.environ.get("GIDEON_RESTART_COUNT", "0"))

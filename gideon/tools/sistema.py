@@ -1282,6 +1282,32 @@ def encerrar_gideon() -> str:
     return "Encerrando todos os subsistemas da Gideon. Até logo, Henry."
 
 
+def reiniciar_gideon() -> dict[str, Any]:
+    """Solicita ao supervisor o reinício completo da Gideon (backend e holograma)."""
+    from gideon.supervisor import sinalizar_reinicio, supervisor_ativo
+
+    if not supervisor_ativo():
+        return {
+            "sucesso": False,
+            "verificado": False,
+            "mensagem": "O supervisor da Gideon nao esta ativo; o reinicio nao foi iniciado.",
+            "mensagem_humana": "O supervisor da Gideon não está ativo; não consegui iniciar o reinício automático.",
+        }
+
+    def _reiniciar():
+        time.sleep(3.0)
+        sinalizar_reinicio()
+
+    threading.Thread(target=_reiniciar, daemon=True).start()
+    return {
+        "sucesso": True,
+        "verificado": True,
+        "agendado": True,
+        "mensagem": "Reinicio agendado no supervisor.",
+        "mensagem_humana": "Reiniciando meus sistemas agora. Volto para a tela em alguns segundos, Henry.",
+    }
+
+
 def atualizar_sistemas() -> dict[str, Any]:
     """Agenda a atualizacao fora do processo que esta usando os arquivos."""
     from gideon.supervisor import sinalizar_atualizacao, supervisor_ativo
@@ -1422,6 +1448,13 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.VERMELHO,
         executar=encerrar_gideon,
         frase=lambda **kwargs: "encerrar e fechar a Gideon completamente",
+    ),
+    Ferramenta(
+        nome="reiniciar_gideon",
+        descricao="Reinicia automaticamente o backend e o holograma da Gideon, reabrindo-a na tela em segundos.",
+        risco=Risco.VERMELHO,
+        executar=reiniciar_gideon,
+        frase=lambda **kwargs: "reiniciar os sistemas da Gideon",
     ),
     Ferramenta(
         nome="atualizar_sistemas",

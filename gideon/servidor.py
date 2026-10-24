@@ -540,14 +540,19 @@ async def websocket_avatar(websocket: WebSocket):
 
 # ─── Controle de Voz ──────────────────────────────────────────
 
+_lock_orquestrador = threading.Lock()
+
+
 def obter_orquestrador():
     global orquestrador_voz
     if orquestrador_voz is None:
-        from gideon.voz.orquestrador import OrquestradorVoz
-        def repassar(ev):
-            if _loop_servidor and _loop_servidor.is_running():
-                asyncio.run_coroutine_threadsafe(broadcast_ws(ev), _loop_servidor)
-        orquestrador_voz = OrquestradorVoz(cerebro, memoria, repassar)
+        with _lock_orquestrador:
+            if orquestrador_voz is None:
+                from gideon.voz.orquestrador import OrquestradorVoz
+                def repassar(ev):
+                    if _loop_servidor and _loop_servidor.is_running():
+                        asyncio.run_coroutine_threadsafe(broadcast_ws(ev), _loop_servidor)
+                orquestrador_voz = OrquestradorVoz(cerebro, memoria, repassar)
     return orquestrador_voz
 
 
@@ -673,7 +678,11 @@ def main():
         global _loop_servidor
         _loop_servidor = asyncio.get_running_loop()
         if ativar_voz_ao_iniciar:
-            obter_orquestrador().iniciar()
+            threading.Thread(
+                target=lambda: obter_orquestrador().iniciar(),
+                daemon=True,
+                name="gideon-init-voz",
+            ).start()
 
     @app.on_event("shutdown")
     async def ao_encerrar():

@@ -44,6 +44,7 @@ def testar_estilo_overlay() -> None:
 def testar_comandos_sensiveis() -> None:
     assert detectar_comando_sistema("atualize seus sistemas") == "atualizar_sistemas"
     assert detectar_comando_sistema("verifique se ha atualizacoes") == "atualizar_sistemas"
+    assert detectar_comando_sistema("reinicie a Gideon") == "reiniciar_gideon"
     assert detectar_comando_sistema("pode encerrar a Gideon") == "encerrar_gideon"
     assert detectar_comando_sistema("qual e a versao?") is None
     assert resposta_confirmacao("Sim, confirmo") is True
@@ -56,6 +57,7 @@ def testar_riscos_do_runtime() -> None:
     riscos = {ferramenta.nome: ferramenta.risco for ferramenta in FERRAMENTAS_SISTEMA}
     assert riscos["obter_status_pc"] is Risco.VERDE
     assert riscos["encerrar_gideon"] is Risco.VERMELHO
+    assert riscos["reiniciar_gideon"] is Risco.VERMELHO
     assert riscos["atualizar_sistemas"] is Risco.VERMELHO
     print("[OK] Atualizacao e encerramento permanecem protegidos pelo portao vermelho.")
 

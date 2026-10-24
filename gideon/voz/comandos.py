@@ -27,6 +27,17 @@ def detectar_comando_sistema(texto: str) -> str | None:
     if any(
         frase in texto_norm
         for frase in (
+            "reinicie a gideon",
+            "reinicia a gideon",
+            "reiniciar a gideon",
+            "reiniciar gideon",
+            "pode reiniciar a gideon",
+        )
+    ):
+        return "reiniciar_gideon"
+    if any(
+        frase in texto_norm
+        for frase in (
             "pode fechar a gideon",
             "pode encerrar a gideon",
             "encerre a gideon",

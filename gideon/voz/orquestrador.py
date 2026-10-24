@@ -612,4 +612,6 @@ class OrquestradorVoz:
         self._confirmacao_expira_em = agora + 30.0
         if ferramenta == "atualizar_sistemas":
             return "[EMOCAO:concentracao] Confirma a atualização dos meus sistemas pelo repositório privado?"
+        if ferramenta == "reiniciar_gideon":
+            return "[EMOCAO:concentracao] Confirma o reinício da Gideon?"
         return "[EMOCAO:preocupacao] Confirma o encerramento completo da Gideon?"
