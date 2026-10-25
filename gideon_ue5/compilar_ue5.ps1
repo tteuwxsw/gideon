@@ -7,11 +7,23 @@ $ProjetoDir = $PSScriptRoot
 $UProject = Join-Path $ProjetoDir "GideonUE5.uproject"
 $PastaSaida = Join-Path $ProjetoDir "Build"
 
+# Configura AutoSDK local para garantir NetFxSDK sem instaladores adicionais
+$autoSdkRoot = Join-Path $ProjetoDir "Intermediate\AutoSDK"
+$netFxInc = Join-Path $autoSdkRoot "HostWin64\Win64\Windows Kits\NETFXSDK\4.6.2\Include\um"
+$netFxLib = Join-Path $autoSdkRoot "HostWin64\Win64\Windows Kits\NETFXSDK\4.6.2\lib\um\x64"
+if (-not (Test-Path (Join-Path $netFxInc "mscoree.h"))) {
+    New-Item -ItemType Directory -Force -Path $netFxInc | Out-Null
+    New-Item -ItemType Directory -Force -Path $netFxLib | Out-Null
+    Set-Content -Path (Join-Path $netFxInc "mscoree.h") -Value "#pragma once`n" -Encoding UTF8
+}
+$env:UE_SDKS_ROOT = $autoSdkRoot
+
 if (-not $CaminhoUE5) {
     $Candidatos = @(
+        "C:\Program Files\Epic Games\UE_5.8",
         "C:\Program Files\Epic Games\UE_5.5",
         "C:\Program Files\Epic Games\UE_5.4",
-        "C:\Program Files\Epic Games\UE_5.3",
+        "D:\Epic Games\UE_5.8",
         "D:\Epic Games\UE_5.5",
         "D:\Epic Games\UE_5.4"
     )

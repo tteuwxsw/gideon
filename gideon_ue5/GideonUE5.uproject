@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "5.4",
+	"EngineAssociation": "5.8",
 	"Category": "AI Assistant",
 	"Description": "Gideon Holographic Desktop Avatar (The Flash / STAR Labs Time Vault) - Otimizado para AMD Radeon RX 580 8GB",
 	"Modules": [
@@ -31,11 +31,15 @@
 			"Enabled": true
 		},
 		{
-			"Name": "OpenXR",
-			"Enabled": false
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
 		},
 		{
-			"Name": "ChaosClothAsset",
+			"Name": "EditorScriptingUtilities",
+			"Enabled": true
+		},
+		{
+			"Name": "OpenXR",
 			"Enabled": false
 		}
 	],

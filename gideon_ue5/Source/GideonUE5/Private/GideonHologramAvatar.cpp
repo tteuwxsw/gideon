@@ -34,15 +34,15 @@ AGideonHologramAvatar::AGideonHologramAvatar()
 
 	MalhaTorso = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MalhaTorso"));
 	MalhaTorso->SetupAttachment(PivoRaiz);
-	MalhaTorso->ForcedLodModel = 2; // Forca LOD 2 na RX 580 para preservar VRAM sem perda perceptivel
+	MalhaTorso->SetForcedLOD(2); // Forca LOD 2 na RX 580 para preservar VRAM sem perda perceptivel
 
 	MalhaRosto = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MalhaRosto"));
 	MalhaRosto->SetupAttachment(MalhaTorso);
-	MalhaRosto->ForcedLodModel = 1; // Rosto em alta definicao (LOD 1) com Hair Cards
+	MalhaRosto->SetForcedLOD(1); // Rosto em alta definicao (LOD 1) com Hair Cards
 
 	MalhaCabeloCards = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MalhaCabeloCards"));
 	MalhaCabeloCards->SetupAttachment(MalhaRosto);
-	MalhaCabeloCards->ForcedLodModel = 2;
+	MalhaCabeloCards->SetForcedLOD(2);
 }
 
 void AGideonHologramAvatar::BeginPlay()
@@ -188,6 +188,15 @@ void AGideonHologramAvatar::AtualizarPosturaCabecaEOmbros(float DeltaTime)
 
 	RotacaoCabecaAtual = FMath::RInterpTo(RotacaoCabecaAtual, AlvoCombinado, DeltaTime, 2.6f);
 	RotacaoPescocoAtual = RotacaoCabecaAtual * 0.42f;
+
+	if (MalhaRosto)
+	{
+		MalhaRosto->SetRelativeRotation(RotacaoCabecaAtual);
+	}
+	if (MalhaTorso)
+	{
+		MalhaTorso->SetRelativeRotation(RotacaoPescocoAtual * 0.35f);
+	}
 }
 
 void AGideonHologramAvatar::AtualizarOlharESacadas(float DeltaTime)

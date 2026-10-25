@@ -19,7 +19,8 @@ public class GideonUE5 : ModuleRules
 			"SlateCore",
 			"ApplicationCore",
 			"RHI",
-			"RenderCore"
+			"RenderCore",
+			"ProceduralMeshComponent"
 		});
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)

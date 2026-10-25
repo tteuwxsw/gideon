@@ -14,6 +14,14 @@ __pycache__/
 .vscode/
 .idea/
 
+# Unreal Engine 5 temporarios e compilados
+gideon_ue5/Intermediate/
+gideon_ue5/Saved/
+gideon_ue5/DerivedDataCache/
+gideon_ue5/Build/
+gideon_ue5/Binaries/
+gideon_ue5_desktop_shot.png
+
 # Sistema
 .DS_Store
 Thumbs.db
