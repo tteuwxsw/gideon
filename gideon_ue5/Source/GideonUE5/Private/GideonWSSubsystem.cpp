@@ -30,10 +30,41 @@ TStatId UGideonWSSubsystem::GetStatId() const
 
 FString UGideonWSSubsystem::CarregarTokenLocal() const
 {
+	// 1. Parametro na linha de comando: -token=...
+	FString TokenLinhaComando;
+	if (FParse::Value(FCommandLine::Get(), TEXT("token="), TokenLinhaComando))
+	{
+		TokenLinhaComando.TrimStartAndEndInline();
+		if (!TokenLinhaComando.IsEmpty())
+		{
+			UE_LOG(LogGideonUE5, Log, TEXT("[Gideon WS] Token carregado via linha de comando."));
+			return TokenLinhaComando;
+		}
+	}
+
+	// 2. Variavel de ambiente do supervisor: GIDEON_RUNTIME_TOKEN ou GIDEON_AUTH_TOKEN
+	FString TokenEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("GIDEON_RUNTIME_TOKEN"));
+	if (TokenEnv.IsEmpty())
+	{
+		TokenEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("GIDEON_AUTH_TOKEN"));
+	}
+	TokenEnv.TrimStartAndEndInline();
+	if (!TokenEnv.IsEmpty())
+	{
+		UE_LOG(LogGideonUE5, Log, TEXT("[Gideon WS] Token carregado via variavel de ambiente."));
+		return TokenEnv;
+	}
+
+	// 3. Arquivos em disco locais e instalados
+	const FString LocalAppData = FPlatformMisc::GetEnvironmentVariable(TEXT("LOCALAPPDATA"));
 	TArray<FString> Candidatos = {
+		FPaths::Combine(FPlatformProcess::GetCurrentWorkingDirectory(), TEXT("dados/auth_token.txt")),
 		FPaths::Combine(FPaths::ProjectDir(), TEXT("../dados/auth_token.txt")),
+		FPaths::Combine(FPaths::ProjectDir(), TEXT("../../../dados/auth_token.txt")),
 		FPaths::Combine(FPaths::LaunchDir(), TEXT("../dados/auth_token.txt")),
-		FPaths::Combine(FPaths::LaunchDir(), TEXT("dados/auth_token.txt"))
+		FPaths::Combine(FPaths::LaunchDir(), TEXT("dados/auth_token.txt")),
+		FPaths::Combine(FPaths::LaunchDir(), TEXT("../../../../../dados/auth_token.txt")),
+		FPaths::Combine(LocalAppData, TEXT("Programs/Gideon/dados/auth_token.txt"))
 	};
 
 	for (const FString& Caminho : Candidatos)
@@ -44,6 +75,7 @@ FString UGideonWSSubsystem::CarregarTokenLocal() const
 			Conteudo.TrimStartAndEndInline();
 			if (!Conteudo.IsEmpty())
 			{
+				UE_LOG(LogGideonUE5, Log, TEXT("[Gideon WS] Token carregado de: %s"), *Caminho);
 				return Conteudo;
 			}
 		}
@@ -60,12 +92,14 @@ void UGideonWSSubsystem::ConectarAoBackend()
 
 	TMap<FString, FString> Headers;
 	const FString Token = CarregarTokenLocal();
+	FString UrlFinal = UrlServidor;
 	if (!Token.IsEmpty())
 	{
 		Headers.Add(TEXT("X-Gideon-Token"), Token);
+		UrlFinal = FString::Printf(TEXT("%s?token=%s"), *UrlServidor, *Token);
 	}
 
-	Socket = FWebSocketsModule::Get().CreateWebSocket(UrlServidor, TEXT(""), Headers);
+	Socket = FWebSocketsModule::Get().CreateWebSocket(UrlFinal, TEXT(""), Headers);
 
 	Socket->OnConnected().AddLambda([this]()
 	{

@@ -65,6 +65,15 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gideon|Malhas")
 	USkeletalMeshComponent* MalhaCabeloCards;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gideon|Malhas")
+	USkeletalMeshComponent* MalhaDentes;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gideon|Malhas")
+	USkeletalMeshComponent* MalhaOlhoEsquerdo;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gideon|Malhas")
+	USkeletalMeshComponent* MalhaOlhoDireito;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gideon|Performance RX580")
 	int32 FPSAtivo = 60;
 

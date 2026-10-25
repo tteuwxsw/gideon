@@ -26,7 +26,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DADOS_DIR = Path(os.environ.get("GIDEON_DATA_DIR", ROOT_DIR / "dados"))
 WEB_DIR = ROOT_DIR / "gideon" / "web"
 TOKEN_FILE = DADOS_DIR / "auth_token.txt"
-ORIGENS_LOCAIS = {"http://127.0.0.1:8000", "http://localhost:8000"}
+ORIGENS_LOCAIS = {"http://127.0.0.1:8000", "http://localhost:8000", "http://127.0.0.1", "http://localhost"}
 
 DADOS_DIR.mkdir(parents=True, exist_ok=True)
 WEB_DIR.mkdir(parents=True, exist_ok=True)
@@ -467,17 +467,17 @@ async def obter_telemetria_avatar(_: bool = Depends(autenticar)):
 
 @app.websocket("/ws")
 async def websocket_avatar(websocket: WebSocket):
-    """Conexão WebSocket bidirecional para o avatar (Godot) ou outros clientes."""
+    """Conexão WebSocket bidirecional para o avatar (Godot ou Unreal Engine 5)."""
     origem = websocket.headers.get("origin")
     token_header = websocket.headers.get("x-gideon-token")
+    token_query = websocket.query_params.get("token")
+    token_cookie = websocket.cookies.get("gideon_token")
+    token = token_header or token_query or token_cookie
+
     if origem and origem not in ORIGENS_LOCAIS:
         await websocket.close(code=4003, reason="Origem nao autorizada")
         return
-    if not origem and not token_header:
-        await websocket.close(code=4003, reason="Cliente nativo sem autenticacao")
-        return
-    token = token_header or websocket.cookies.get("gideon_token")
-    if not token_valido(token, TOKEN_LOCAL):
+    if not token or not token_valido(token, TOKEN_LOCAL):
         await websocket.close(code=4001, reason="Token inválido")
         return
 

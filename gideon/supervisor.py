@@ -20,6 +20,7 @@ DADOS_DIR = ROOT_DIR / "dados"
 AVATAR_DIR = ROOT_DIR / "gideon_avatar"
 UE5_DIR = ROOT_DIR / "gideon_ue5"
 RUNTIME_FILE = DADOS_DIR / "runtime.json"
+TOKEN_FILE = DADOS_DIR / "auth_token.txt"
 RESTART_FILE = DADOS_DIR / "reiniciar.solicitado"
 UPDATE_FILE = DADOS_DIR / "atualizar.solicitado"
 LOG_FILE = DADOS_DIR / "gideon_supervisor.log"
@@ -356,9 +357,18 @@ def executar() -> int:
             raise RuntimeError("O backend nao respondeu ao health check em 90 segundos.")
 
         motor_avatar, comando_avatar = localizar_renderizador_avatar()
+        if motor_avatar == "ue5" and TOKEN_FILE.exists():
+            try:
+                token_txt = TOKEN_FILE.read_text(encoding="utf-8").strip()
+                if token_txt:
+                    comando_avatar.append(f"-token={token_txt}")
+            except OSError:
+                pass
+
         avatar = subprocess.Popen(
             comando_avatar,
             cwd=ROOT_DIR,
+            env=ambiente,
             stdout=log_handle,
             stderr=log_handle,
         )

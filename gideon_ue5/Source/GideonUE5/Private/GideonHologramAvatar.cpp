@@ -6,6 +6,7 @@
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Dom/JsonObject.h"
+#include "UObject/ConstructorHelpers.h"
 
 static const FName CURVAS_EXPRESSAO_ARKIT[] = {
 	TEXT("mouthSmileLeft"), TEXT("mouthSmileRight"),
@@ -43,11 +44,68 @@ AGideonHologramAvatar::AGideonHologramAvatar()
 	MalhaCabeloCards = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MalhaCabeloCards"));
 	MalhaCabeloCards->SetupAttachment(MalhaRosto);
 	MalhaCabeloCards->SetForcedLOD(2);
+
+	MalhaDentes = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MalhaDentes"));
+	MalhaDentes->SetupAttachment(MalhaRosto);
+	MalhaDentes->SetForcedLOD(2);
+
+	MalhaOlhoEsquerdo = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MalhaOlhoEsquerdo"));
+	MalhaOlhoEsquerdo->SetupAttachment(MalhaRosto);
+
+	MalhaOlhoDireito = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MalhaOlhoDireito"));
+	MalhaOlhoDireito->SetupAttachment(MalhaRosto);
+
+	// Atribuicao de malhas esqueleticas de alta fidelidade
+	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshTorsoFinder(TEXT("/Game/Gideon/gideon/SkeletalMeshes/Wolf3D_Outfit_Top.Wolf3D_Outfit_Top"));
+	if (MeshTorsoFinder.Succeeded())
+	{
+		MalhaTorso->SetSkeletalMesh(MeshTorsoFinder.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshRostoFinder(TEXT("/Game/Gideon/gideon/SkeletalMeshes/Wolf3D_Head.Wolf3D_Head"));
+	if (MeshRostoFinder.Succeeded())
+	{
+		MalhaRosto->SetSkeletalMesh(MeshRostoFinder.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshCabeloFinder(TEXT("/Game/Gideon/gideon/SkeletalMeshes/Wolf3D_Hair.Wolf3D_Hair"));
+	if (MeshCabeloFinder.Succeeded())
+	{
+		MalhaCabeloCards->SetSkeletalMesh(MeshCabeloFinder.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshDentesFinder(TEXT("/Game/Gideon/gideon/SkeletalMeshes/Wolf3D_Teeth.Wolf3D_Teeth"));
+	if (MeshDentesFinder.Succeeded())
+	{
+		MalhaDentes->SetSkeletalMesh(MeshDentesFinder.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshOlhoEsqFinder(TEXT("/Game/Gideon/gideon/SkeletalMeshes/EyeLeft.EyeLeft"));
+	if (MeshOlhoEsqFinder.Succeeded())
+	{
+		MalhaOlhoEsquerdo->SetSkeletalMesh(MeshOlhoEsqFinder.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshOlhoDirFinder(TEXT("/Game/Gideon/gideon/SkeletalMeshes/EyeRight.EyeRight"));
+	if (MeshOlhoDirFinder.Succeeded())
+	{
+		MalhaOlhoDireito->SetSkeletalMesh(MeshOlhoDirFinder.Object);
+	}
 }
 
 void AGideonHologramAvatar::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Sincroniza poses das partes componentes com o tronco mestre
+	if (MalhaTorso)
+	{
+		if (MalhaRosto) MalhaRosto->SetLeaderPoseComponent(MalhaTorso);
+		if (MalhaCabeloCards) MalhaCabeloCards->SetLeaderPoseComponent(MalhaTorso);
+		if (MalhaDentes) MalhaDentes->SetLeaderPoseComponent(MalhaTorso);
+		if (MalhaOlhoEsquerdo) MalhaOlhoEsquerdo->SetLeaderPoseComponent(MalhaTorso);
+		if (MalhaOlhoDireito) MalhaOlhoDireito->SetLeaderPoseComponent(MalhaTorso);
+	}
 
 	InicializarTabelasCurvas();
 	CriarMateriaisDinamicosHolograma();
@@ -90,7 +148,7 @@ void AGideonHologramAvatar::InicializarTabelasCurvas()
 void AGideonHologramAvatar::CriarMateriaisDinamicosHolograma()
 {
 	MateriaisHolograma.Empty();
-	USkeletalMeshComponent* Componentes[] = { MalhaTorso, MalhaRosto, MalhaCabeloCards };
+	USkeletalMeshComponent* Componentes[] = { MalhaTorso, MalhaRosto, MalhaCabeloCards, MalhaDentes, MalhaOlhoEsquerdo, MalhaOlhoDireito };
 	for (USkeletalMeshComponent* Comp : Componentes)
 	{
 		if (!Comp) continue;
@@ -370,37 +428,46 @@ void AGideonHologramAvatar::AplicarCurvaFacial(const FName& NomeARKit, float Pes
 			MalhaRosto->SetMorphTarget(TEXT("CTRL_expressions_mouthFunnelUR"), Valor);
 		}
 	}
+	if (MalhaDentes)
+	{
+		MalhaDentes->SetMorphTarget(NomeARKit, Valor);
+	}
 }
 
 void AGideonHologramAvatar::AplicarVisemaNoRigFacial(const FString& NomeVisema, float Peso)
 {
 	const float V = FMath::Clamp(Peso, 0.0f, 1.0f);
-	if (!MalhaRosto) return;
+	if (MalhaRosto)
+	{
+		// 1. Aplica diretamente no morph target Oculus caso exista na malha
+		MalhaRosto->SetMorphTarget(FName(*NomeVisema), V);
 
-	// 1. Aplica diretamente no morph target Oculus caso exista na malha
-	MalhaRosto->SetMorphTarget(FName(*NomeVisema), V);
-
-	// 2. Traduz o visema Oculus para combinacoes anatomicas ARKit / MetaHuman (para malhas MetaHuman puras)
-	if (NomeVisema == TEXT("viseme_PP"))
-	{
-		MalhaRosto->SetMorphTarget(TEXT("mouthClose"), V * 0.75f);
-		MalhaRosto->SetMorphTarget(TEXT("mouthPressLeft"), V * 0.55f);
-		MalhaRosto->SetMorphTarget(TEXT("mouthPressRight"), V * 0.55f);
+		// 2. Traduz o visema Oculus para combinacoes anatomicas ARKit / MetaHuman (para malhas MetaHuman puras)
+		if (NomeVisema == TEXT("viseme_PP"))
+		{
+			MalhaRosto->SetMorphTarget(TEXT("mouthClose"), V * 0.75f);
+			MalhaRosto->SetMorphTarget(TEXT("mouthPressLeft"), V * 0.55f);
+			MalhaRosto->SetMorphTarget(TEXT("mouthPressRight"), V * 0.55f);
+		}
+		else if (NomeVisema == TEXT("viseme_FF"))
+		{
+			MalhaRosto->SetMorphTarget(TEXT("mouthRollLower"), V * 0.65f);
+			MalhaRosto->SetMorphTarget(TEXT("mouthUpperUpLeft"), V * 0.25f);
+			MalhaRosto->SetMorphTarget(TEXT("mouthUpperUpRight"), V * 0.25f);
+		}
+		else if (NomeVisema == TEXT("viseme_SS") || NomeVisema == TEXT("viseme_I"))
+		{
+			MalhaRosto->SetMorphTarget(TEXT("mouthStretchLeft"), V * 0.42f);
+			MalhaRosto->SetMorphTarget(TEXT("mouthStretchRight"), V * 0.42f);
+		}
+		else if (NomeVisema == TEXT("viseme_O") || NomeVisema == TEXT("viseme_U") || NomeVisema == TEXT("viseme_CH"))
+		{
+			MalhaRosto->SetMorphTarget(TEXT("mouthPucker"), V * 0.52f);
+		}
 	}
-	else if (NomeVisema == TEXT("viseme_FF"))
+	if (MalhaDentes)
 	{
-		MalhaRosto->SetMorphTarget(TEXT("mouthRollLower"), V * 0.65f);
-		MalhaRosto->SetMorphTarget(TEXT("mouthUpperUpLeft"), V * 0.25f);
-		MalhaRosto->SetMorphTarget(TEXT("mouthUpperUpRight"), V * 0.25f);
-	}
-	else if (NomeVisema == TEXT("viseme_SS") || NomeVisema == TEXT("viseme_I"))
-	{
-		MalhaRosto->SetMorphTarget(TEXT("mouthStretchLeft"), V * 0.42f);
-		MalhaRosto->SetMorphTarget(TEXT("mouthStretchRight"), V * 0.42f);
-	}
-	else if (NomeVisema == TEXT("viseme_O") || NomeVisema == TEXT("viseme_U") || NomeVisema == TEXT("viseme_CH"))
-	{
-		MalhaRosto->SetMorphTarget(TEXT("mouthPucker"), V * 0.52f);
+		MalhaDentes->SetMorphTarget(FName(*NomeVisema), V);
 	}
 }
 
