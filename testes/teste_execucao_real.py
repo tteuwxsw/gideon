@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import threading
 import time
 import httpx
 import psutil
@@ -25,6 +26,7 @@ def _criar_orquestrador_teste() -> OrquestradorVoz:
     orc._confirmacao_pendente = None
     orc._parametros_pendentes = {}
     orc._confirmacao_expira_em = 0.0
+    orc._confirmacao_lock = threading.Lock()
     orc._em_conversa_ativa = True
     orc._ultimo_contato = time.time()
     orc.modo_escuta = ModoEscuta.CONVERSA_CONTINUA
@@ -63,7 +65,11 @@ def test_proibicao_falsa_confirmacao_e_recuperacao():
         "fallback_web": "https://www.google.com",
     }
     try:
-        res_rec = orc._executor.executar("abrir_programa", {"nome": "app_teste_web"})
+        res_rec = orc._executor.executar(
+            "abrir_programa",
+            {"nome": "app_teste_web"},
+            auto_amarelo=True,
+        )
         assert res_rec.estado == EstadoExecucao.FAILED
         assert res_rec.verificado is False
         assert res_rec.sugestao_recuperacao == "versao_web"
@@ -136,6 +142,7 @@ def test_ciclo_arquivos_e_lixeira_verificado():
     res_criar = orc._executor.executar(
         "criar_arquivo",
         {"caminho": nome_arq, "conteudo": conteudo_esperado, "pasta": "documentos"},
+        auto_amarelo=True,
     )
     assert res_criar.estado == EstadoExecucao.SUCCESS
     assert res_criar.verificado is True
@@ -156,7 +163,11 @@ def test_ciclo_arquivos_e_lixeira_verificado():
     assert res_ler.resultado["conteudo"] == conteudo_esperado
 
     # 4. Move para a Lixeira do Windows e verifica que saiu do diretório
-    res_lixeira = orc._executor.executar("mover_para_lixeira", {"caminho": str(caminho_criado)})
+    res_lixeira = orc._executor.executar(
+        "mover_para_lixeira",
+        {"caminho": str(caminho_criado)},
+        auto_amarelo=True,
+    )
     assert res_lixeira.estado == EstadoExecucao.SUCCESS
     assert res_lixeira.verificado is True
     assert not caminho_criado.exists()

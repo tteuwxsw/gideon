@@ -1,9 +1,11 @@
-"""Gideon — Assistente Pessoal com Interface Holográfica."""
+"""Gideon - assistente pessoal local para Windows."""
 
-__version__ = "0.3.0"
+from gideon.versao import VERSAO
+
+__version__ = VERSAO
 
 
 def main():
     """Ponto de entrada do comando `gideon`."""
-    from gideon.servidor import main as servidor_main
-    servidor_main()
+    from gideon.supervisor import main as supervisor_main
+    return supervisor_main()

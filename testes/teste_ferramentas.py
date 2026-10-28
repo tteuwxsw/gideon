@@ -2,9 +2,10 @@
 
 import json
 from pathlib import Path
+import uuid
 from gideon.gate import RegistroFerramentas, Risco, LOG_AUDITORIA, obter_historico_auditoria
 from gideon.tools.sistema import obter_status_pc, listar_programas_usuario, FERRAMENTAS_SISTEMA
-from gideon.tools.arquivos import ler_arquivo, listar_arquivos, FERRAMENTAS_ARQUIVOS
+from gideon.tools.arquivos import criar_arquivo, ler_arquivo, listar_arquivos, FERRAMENTAS_ARQUIVOS
 from gideon.tools import obter_catalogo_ferramentas
 
 
@@ -48,6 +49,29 @@ def test_segurança_sandbox_arquivos():
     res_seguro = ler_arquivo("README.md")
     assert "caminho" in res_seguro
     print("  -> Leitura de arquivo permitido: OK")
+
+    # 3. Travessia e caminhos absolutos fora das raizes autorizadas sao bloqueados
+    res_travessia = ler_arquivo(r"..\..\AppData\Local\arquivo.txt")
+    assert res_travessia.get("sucesso") is False
+    assert "Acesso negado" in res_travessia["erro"]
+
+    res_fora = ler_arquivo(str(Path.home() / "AppData" / "Local" / "arquivo.txt"))
+    assert res_fora.get("sucesso") is False
+    assert "Acesso negado" in res_fora["erro"]
+    print("  -> Travessia e caminhos fora do sandbox: OK")
+
+    # 4. Criacao e permitida no projeto, mas sobrescrita silenciosa nunca e aceita
+    nome_teste = f"dados/teste_sandbox_{uuid.uuid4().hex}.txt"
+    caminho_teste = Path(__file__).resolve().parent.parent / nome_teste
+    try:
+        primeira = criar_arquivo(nome_teste, "primeiro", pasta="projeto")
+        segunda = criar_arquivo(nome_teste, "segundo", pasta="projeto")
+        assert primeira.get("sucesso") is True
+        assert segunda.get("sucesso") is False
+        assert caminho_teste.read_text(encoding="utf-8") == "primeiro"
+        print("  -> Sobrescrita silenciosa bloqueada: OK")
+    finally:
+        caminho_teste.unlink(missing_ok=True)
 
 
 def test_auditoria_portao():

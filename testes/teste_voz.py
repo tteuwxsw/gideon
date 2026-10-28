@@ -4,7 +4,9 @@ import asyncio
 import threading
 import time
 import httpx
+import numpy as np
 from gideon.servidor import app, TOKEN_LOCAL
+from gideon.gate import PARADO
 from gideon.voz.comandos import (
     avaliar_fala_direcionada,
     eh_desistencia_rapida,
@@ -13,7 +15,12 @@ from gideon.voz.comandos import (
     formatar_resposta_telemetria,
     interpretar_intencao_natural,
 )
-from gideon.voz.fala import IDENTIFICADOR_VOZ_FIXA, SintetizadorVoz, formatar_prosodia_gideon
+from gideon.voz.fala import (
+    IDENTIFICADOR_VOZ_FIXA,
+    SintetizadorVoz,
+    formatar_prosodia_gideon,
+    limpar_texto_para_fala,
+)
 from gideon.voz.metricas import metricas_voz_global
 from gideon.voz.orquestrador import OrquestradorVoz
 from gideon.voz.ouvido import OuvinteVoz, corrigir_erros_transcricao
@@ -140,7 +147,11 @@ def test_fala_direcionada_sem_wake_word():
 def test_30_interacoes_consistencia_voz_e_latencia():
     print("[5/7] Executando 30 interações consecutivas (Consistência Vocal + Latência p50/p95)...")
     sintetizador = SintetizadorVoz(pre_aquecer=False)
-    assert sintetizador.voz_id == IDENTIFICADOR_VOZ_FIXA == "pt-BR-FranciscaNeural"
+    assert sintetizador.voz_id == IDENTIFICADOR_VOZ_FIXA == "pt-BR-ThalitaMultilingualNeural"
+    sintetizador._gerar_audio_voz_fixa = lambda _texto: (
+        np.full(2400, 0.02, dtype=np.float32),
+        24000,
+    )
 
     # Pré-aquece as frases no cache em memória/disco
     sintetizador._pre_aquecer_frases_comuns()
@@ -161,11 +172,20 @@ def test_30_interacoes_consistencia_voz_e_latencia():
     orc._confirmacao_pendente = None
     orc._parametros_pendentes = {}
     orc._confirmacao_expira_em = 0.0
+    orc._confirmacao_lock = threading.Lock()
     orc._em_conversa_ativa = True
     orc._ultimo_contato = time.time()
     orc.historico_sessao = []
     orc.contexto_conversa = {}
     orc.callback_ws = None
+
+    orc._confirmacao_pendente = "encerrar_gideon"
+    assert "cancelada" in orc.processar_fala_local_rapida("para").lower()
+    assert orc._confirmacao_pendente is None
+    assert "ativada" in orc.processar_fala_local_rapida("parada de emergência").lower()
+    assert PARADO.is_set()
+    assert "liberada" in orc.processar_fala_local_rapida("retomar execução").lower()
+    assert not PARADO.is_set()
 
     entradas_30 = [
         "__PRESENCA__",
@@ -182,9 +202,9 @@ def test_30_interacoes_consistencia_voz_e_latencia():
         "Não, espera, deixa aberto",
         "Abre isso aqui pra mim",
         "Quais programas estão abertos?",
-        "Modo foco",
-        "Modo conversa",
-        "Modo compacto",
+        "Meu computador tá estranho hoje",
+        "Tá meio lento",
+        "Não precisa",
         "Ativar modo conversa livre",
         "Ativar modo conversa contínua",
         "Ativar modo por nome",
@@ -207,11 +227,12 @@ def test_30_interacoes_consistencia_voz_e_latencia():
         t0 = time.perf_counter()
         resp = orc.processar_fala_local_rapida(entrada)
         assert resp is not None, f"Falha na interação #{idx}: '{entrada}'"
+        assert "[EMOCAO:" not in resp, f"Resposta local contém tag legada: {resp}"
         nlu_ms = orc.ultimo_nlu_ms
 
         # Verifica síntese para memória e cache com a voz única fixa
         t_tts = time.perf_counter()
-        texto_fala = orc._emitir_emocoes_e_limpar(resp)
+        texto_fala = limpar_texto_para_fala(resp)
         audio, taxa, do_cache = sintetizador.sintetizar_para_memoria(texto_fala)
         tts_ms = (time.perf_counter() - t_tts) * 1000.0
 
@@ -231,7 +252,7 @@ def test_30_interacoes_consistencia_voz_e_latencia():
 
     resumo = metricas_voz_global.resumo_estatistico()
     assert resumo["voz_fixa_unica"] is True, f"Voz mudou! Vozes vistas: {resumo['vozes_vistas']}"
-    assert vozes_usadas == {"pt-BR-FranciscaNeural"}
+    assert vozes_usadas == {"pt-BR-ThalitaMultilingualNeural"}
     print(f"  -> 30/30 interações com 100% de consistência vocal ({sintetizador.voz_id})!")
     print(f"  -> Latência NLU p50: {resumo['p50_ms']['nlu_ms']} ms | p95: {resumo['p95_ms']['nlu_ms']} ms")
     print(f"  -> Latência TTS (com cache) p50: {resumo['p50_ms']['tts_ttfa_ms']} ms | p95: {resumo['p95_ms']['tts_ttfa_ms']} ms")
@@ -242,6 +263,16 @@ def test_barge_in_e_streaming_incremental():
     print("[6/7] Testando Barge-In e síntese incremental por sentenças (falar_stream)...")
     eventos = []
     sintetizador = SintetizadorVoz(callback_evento=lambda e: eventos.append(e), pre_aquecer=False)
+    sintetizador._gerar_audio_voz_fixa = lambda _texto: (
+        np.full(12000, 0.02, dtype=np.float32),
+        24000,
+    )
+
+    def reproduzir_sem_hardware(_audio, _taxa):
+        while not sintetizador._evento_interromper.wait(0.04):
+            sintetizador._notificar({"tipo": "voz_nivel", "nivel": 0.4})
+
+    sintetizador._reproduzir_audio = reproduzir_sem_hardware
 
     def interromper_logo():
         time.sleep(0.15)
@@ -252,6 +283,13 @@ def test_barge_in_e_streaming_incremental():
     assert concluiu is False or sintetizador.foi_interrompida is True
     tipos = [e["tipo"] for e in eventos]
     assert "fala_inicio" in tipos and "fala_fim" in tipos
+    assert "voz_nivel" in tipos
+    assert "speaking" in [e.get("estado") for e in eventos if e["tipo"] == "estado_ia"]
+    assert all(
+        set(e) == {"tipo", "nivel"} and 0.0 <= e["nivel"] <= 1.0
+        for e in eventos
+        if e["tipo"] == "voz_nivel"
+    )
     print("  -> Barge-In em streaming incremental validado: OK")
 
 
@@ -266,7 +304,10 @@ async def test_api_modos_e_metricas():
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         res = await client.get("/api/voz/status", headers=headers)
         assert res.status_code == 200
-        assert res.json()["voz_fixa_id"] == "pt-BR-FranciscaNeural"
+        dados_voz = res.json()
+        assert dados_voz["inicializacao"] in {"nao_iniciada", "inicializando", "pronta"}
+        if dados_voz["inicializacao"] == "pronta":
+            assert dados_voz["voz_fixa_id"] == "pt-BR-ThalitaMultilingualNeural"
 
         res_m = await client.get("/api/voz/metricas", headers=headers)
         assert res_m.status_code == 200

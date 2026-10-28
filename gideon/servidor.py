@@ -1,16 +1,16 @@
-"""Servidor local da Gideon (FastAPI + SSE streaming + WebSocket para avatar)."""
+"""Servidor local da Gideon (FastAPI, streaming e eventos do aplicativo)."""
 
 import queue
 import os
 import secrets
 import threading
-from pathlib import Path
 from typing import AsyncGenerator
 from fastapi import (
     FastAPI, Depends, HTTPException, Header, Request, WebSocket,
     WebSocketDisconnect, status,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -19,14 +19,17 @@ import asyncio
 
 from gideon.cerebro import Cerebro
 from gideon.auth import obter_ou_criar_token, token_valido
+from gideon.caminhos import DADOS_DIR, ROOT_DIR, WEB_DIR
+from gideon.gate import PARADO, ativar_parada_emergencia, retomar_execucao
 from gideon.memoria import Memoria
+from gideon.versao import VERSAO
 
 # Diretórios base
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DADOS_DIR = Path(os.environ.get("GIDEON_DATA_DIR", ROOT_DIR / "dados"))
-WEB_DIR = ROOT_DIR / "gideon" / "web"
 TOKEN_FILE = DADOS_DIR / "auth_token.txt"
 ORIGENS_LOCAIS = {"http://127.0.0.1:8000", "http://localhost:8000", "http://127.0.0.1", "http://localhost"}
+_bootstrap_token = os.environ.pop("GIDEON_BOOTSTRAP_TOKEN", None)
+_runtime_token = os.environ.pop("GIDEON_RUNTIME_TOKEN", None)
+_bootstrap_lock = threading.Lock()
 
 DADOS_DIR.mkdir(parents=True, exist_ok=True)
 WEB_DIR.mkdir(parents=True, exist_ok=True)
@@ -34,7 +37,7 @@ WEB_DIR.mkdir(parents=True, exist_ok=True)
 
 TOKEN_LOCAL = obter_ou_criar_token(TOKEN_FILE)
 
-app = FastAPI(title="Gideon — Assistente Pessoal", version="0.3.0")
+app = FastAPI(title="Gideon — Assistente Pessoal", version=VERSAO)
 
 # Restringe CORS estritamente à máquina local
 app.add_middleware(
@@ -63,12 +66,15 @@ cerebro = Cerebro()
 memoria = Memoria(DADOS_DIR / "memoria.db")
 historico_conversa: list[dict[str, str]] = []
 orquestrador_voz = None
+_estado_inicializacao_voz = "nao_iniciada"
+_erro_inicializacao_voz: str | None = None
 _loop_servidor = None
 _uvicorn_server = None
 
-# Conexões WebSocket ativas (avatar Godot e outros clientes)
+# Conexoes WebSocket ativas no aplicativo
 _clientes_ws: set[WebSocket] = set()
 _lock_ws = asyncio.Lock()
+_estado_interface = {"estado": "idle", "nivel_voz": 0.0, "sequencia": 0}
 
 
 # ─── Autenticação ──────────────────────────────────────────────
@@ -78,7 +84,7 @@ def autenticar(
     x_gideon_token: str | None = Header(None, alias="x-gideon-token"),
 ) -> bool:
     """Verifica se o token fornecido confere com o token local."""
-    token_fornecido = x_gideon_token or request.cookies.get("gideon_token")
+    token_fornecido = x_gideon_token or request.cookies.get("gideon_token") or request.query_params.get("token")
 
     if not token_valido(token_fornecido, TOKEN_LOCAL):
         raise HTTPException(
@@ -88,11 +94,32 @@ def autenticar(
     return True
 
 
-# ─── Broadcast para WebSocket (envia eventos para o avatar) ───
+# ─── Eventos em tempo real do aplicativo ─────────────────────
 
 async def broadcast_ws(evento: dict) -> None:
     """Envia um evento JSON para todos os clientes WebSocket conectados."""
     global _clientes_ws
+    tipo = evento.get("tipo")
+    estado = None
+    if tipo == "estado_ia":
+        estado = evento.get("estado")
+    elif tipo == "ouvindo":
+        estado = "listening" if evento.get("ativo") else "idle"
+    elif tipo == "pensando":
+        estado = "thinking" if evento.get("ativo") else "idle"
+    elif tipo == "fala_inicio":
+        estado = "speaking"
+    elif tipo == "fala_fim":
+        estado = "idle"
+    if estado and evento.get("origem") != "voz" and _estado_interface["estado"] in {"listening", "speaking"}:
+        estado = None
+    if estado:
+        _estado_interface["estado"] = estado
+    if tipo == "voz_nivel":
+        _estado_interface["nivel_voz"] = float(evento.get("nivel", 0.0))
+    if estado or tipo == "voz_nivel":
+        _estado_interface["sequencia"] += 1
+        evento = {**evento, "sequencia": _estado_interface["sequencia"]}
     if not _clientes_ws:
         return
     mensagem = json.dumps(evento, ensure_ascii=False)
@@ -112,44 +139,21 @@ class MensagemRequisicao(BaseModel):
     mensagem: str
 
 
-class EmocaoRequisicao(BaseModel):
-    nome: str
-    intensidade: float = 1.0
-
-
-class ModoRequisicao(BaseModel):
-    modo: str
-
-
-class ConfigHologramaRequisicao(BaseModel):
-    estado_ia: str | None = None
-    opacidade: float | None = None
-    escala: float | None = None
-    click_through: bool | None = None
-    sempre_visivel: bool | None = None
-    qualidade: str | None = None
-    fps_ativo: int | None = None
-    fps_ocioso: int | None = None
-    posicao_x: int | None = None
-    posicao_y: int | None = None
-
-
-_telemetria_avatar_atual: dict = {
-    "fps": 60,
-    "estado_ia": "idle",
-    "emocao": "neutra",
-    "visema_ativo": "viseme_sil",
-    "olhar_x": 0.0,
-    "olhar_y": 0.0,
-    "modo": "conversa",
-}
-
-
 # ─── Rotas HTTP ───────────────────────────────────────────────
+
+# Monta os assets estáticos compilados do React se existirem
+dist_assets = WEB_DIR / "dist" / "assets"
+if dist_assets.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(dist_assets)), name="assets")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    """Serve a interface web do chat local."""
+    """Serve a interface web moderna em React com fallback para legada."""
+    dist_html = WEB_DIR / "dist" / "index.html"
+    if dist_html.is_file():
+        return HTMLResponse(dist_html.read_text(encoding="utf-8"))
+
     html_path = WEB_DIR / "index.html"
     if not html_path.exists():
         return HTMLResponse(
@@ -157,8 +161,26 @@ async def index():
             status_code=404,
         )
 
-    conteudo = html_path.read_text(encoding="utf-8")
-    return HTMLResponse(conteudo)
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/avatar/{nome}")
+async def avatar_asset(nome: str):
+    """Serve somente os assets conhecidos do retrato holografico."""
+    permitidos = {
+        "gideon-idle.webp": "image/webp",
+        "gideon-speaking.webp": "image/webp",
+        "gideon-thinking.webp": "image/webp",
+        "gideon-welcome.webp": "image/webp",
+        "gideon-head.glb": "model/gltf-binary",
+    }
+    if nome not in permitidos:
+        raise HTTPException(status_code=404, detail="Asset de avatar nao encontrado.")
+    return FileResponse(
+        WEB_DIR / "avatar" / nome,
+        media_type=permitidos[nome],
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 class LoginRequisicao(BaseModel):
@@ -168,7 +190,14 @@ class LoginRequisicao(BaseModel):
 @app.post("/api/auth/login")
 async def login_local(req: LoginRequisicao):
     """Troca o token inicial por um cookie local que JavaScript nao consegue ler."""
-    if not token_valido(req.token, TOKEN_LOCAL):
+    global _bootstrap_token
+    autorizado = token_valido(req.token, TOKEN_LOCAL)
+    if not autorizado:
+        with _bootstrap_lock:
+            if _bootstrap_token and secrets.compare_digest(req.token, _bootstrap_token):
+                autorizado = True
+                _bootstrap_token = None
+    if not autorizado:
         raise HTTPException(status_code=401, detail="Token local invalido.")
 
     response = JSONResponse({"status": "ok"})
@@ -192,14 +221,26 @@ async def health():
 @app.post("/api/runtime/shutdown")
 async def encerrar_runtime(x_gideon_runtime: str | None = Header(None)):
     """Permite somente ao supervisor encerrar o backend cooperativamente."""
-    token_runtime = os.environ.get("GIDEON_RUNTIME_TOKEN")
-    if not token_runtime or not x_gideon_runtime or not secrets.compare_digest(
-        x_gideon_runtime, token_runtime
+    if not _runtime_token or not x_gideon_runtime or not secrets.compare_digest(
+        x_gideon_runtime, _runtime_token
     ):
         raise HTTPException(status_code=403, detail="Supervisor invalido.")
     if _uvicorn_server is not None:
         _uvicorn_server.should_exit = True
     return {"status": "encerrando"}
+
+
+@app.post("/api/runtime/bootstrap")
+async def renovar_bootstrap(x_gideon_runtime: str | None = Header(None)):
+    """Entrega ao supervisor um token descartavel para reabrir a interface."""
+    global _bootstrap_token
+    if not _runtime_token or not x_gideon_runtime or not secrets.compare_digest(
+        x_gideon_runtime, _runtime_token
+    ):
+        raise HTTPException(status_code=403, detail="Supervisor invalido.")
+    with _bootstrap_lock:
+        _bootstrap_token = secrets.token_urlsafe(24)
+        return {"token": _bootstrap_token}
 
 
 @app.get("/api/status")
@@ -208,11 +249,31 @@ async def obter_status(_: bool = Depends(autenticar)):
     return {
         "status": "online",
         "nome": "Gideon",
-        "versao": "0.3.0",
+        "versao": VERSAO,
         "modelo": cerebro.modelo,
         "mensagens_no_historico": len(historico_conversa),
         "clientes_ws": len(_clientes_ws),
+        "parada_emergencia": PARADO.is_set(),
     }
+
+
+@app.post("/api/emergencia/parar")
+async def parar_emergencia(_: bool = Depends(autenticar)):
+    """Bloqueia ferramentas e cancela fala ou confirmacao pendente."""
+    ativar_parada_emergencia()
+    if orquestrador_voz is not None:
+        orquestrador_voz._cancelar_confirmacao_pendente()
+        orquestrador_voz.interromper_fala()
+    await broadcast_ws({"tipo": "parada_emergencia", "ativa": True})
+    return {"status": "parado", "parada_emergencia": True}
+
+
+@app.post("/api/emergencia/retomar")
+async def retomar_emergencia(_: bool = Depends(autenticar)):
+    """Libera ferramentas depois de uma decisao explicita do usuario."""
+    retomar_execucao()
+    await broadcast_ws({"tipo": "parada_emergencia", "ativa": False})
+    return {"status": "ativo", "parada_emergencia": False}
 
 
 @app.post("/api/chat/limpar")
@@ -227,6 +288,74 @@ async def limpar_chat(_: bool = Depends(autenticar)):
 async def listar_fatos(_: bool = Depends(autenticar)):
     """Lista todos os fatos gravados na memória permanente."""
     return {"fatos": memoria.listar_fatos()}
+
+
+@app.get("/api/automacoes")
+async def listar_automacoes_api(_: bool = Depends(autenticar)):
+    """Lista as automações registradas na Gideon."""
+    from gideon.tools.automacoes_tools import automacao_listar
+    return automacao_listar()
+
+
+@app.get("/api/habilidades")
+async def listar_habilidades_api(_: bool = Depends(autenticar)):
+    """Lista as habilidades registradas da Gideon."""
+    from gideon.tools.automacoes_tools import habilidade_listar
+    return habilidade_listar()
+
+
+@app.get("/api/perfil")
+async def obter_perfil_api(_: bool = Depends(autenticar)):
+    """Retorna o perfil vivo do Henry."""
+    from gideon import perfil
+    return {"perfil": perfil.ler()}
+
+
+class IdiomaRequisicao(BaseModel):
+    idioma: str
+
+
+@app.get("/api/idioma")
+async def obter_idioma_api(_: bool = Depends(autenticar)):
+    """Retorna o idioma ativo e os idiomas suportados."""
+    from gideon.configuracao import obter_idioma, IDIOMAS_SUPORTADOS
+    idioma_atual = obter_idioma()
+    return {
+        "status": "ok",
+        "idioma": idioma_atual,
+        "idiomas": [
+            {"codigo": cod, "nome": dados["nome"], "descricao": dados["descricao"]}
+            for cod, dados in IDIOMAS_SUPORTADOS.items()
+        ],
+    }
+
+
+@app.get("/api/sons/{tipo}")
+async def obter_som_api(tipo: str):
+    """Retorna o áudio WAV de um earcon procedural da Gideon."""
+    from fastapi.responses import Response
+    from gideon.voz.sons import obter_wav_bytes
+    try:
+        dados_wav = obter_wav_bytes(tipo)
+        return Response(content=dados_wav, media_type="audio/wav")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/idioma")
+async def definir_idioma_api(req: IdiomaRequisicao, _: bool = Depends(autenticar)):
+    """Atualiza o idioma da Gideon (salva em config e sincroniza a voz)."""
+    from gideon.configuracao import definir_idioma, IDIOMAS_SUPORTADOS
+    if req.idioma not in IDIOMAS_SUPORTADOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Idioma '{req.idioma}' inválido. Suportados: {list(IDIOMAS_SUPORTADOS.keys())}",
+        )
+    idioma_salvo = definir_idioma(req.idioma)
+    if orquestrador_voz is not None:
+        orquestrador_voz.atualizar_idioma(idioma_salvo)
+    await broadcast_ws({"tipo": "idioma_alterado", "idioma": idioma_salvo})
+    return {"status": "ok", "idioma": idioma_salvo}
 
 
 class FatoRequisicao(BaseModel):
@@ -259,30 +388,19 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
 
     historico_conversa.append({"role": "user", "content": texto_usuario})
 
-    # Detecta intenções de movimentação física da Gideon na tela
-    texto_lower = texto_usuario.lower()
-    if any(c in texto_lower for c in ["vai pro canto", "vai para o canto", "fica no canto", "modo compacto"]):
-        await broadcast_ws({"tipo": "modo", "nome": "compacto"})
-    elif any(c in texto_lower for c in ["vem pro centro", "vem para o centro", "modo conversa", "fica no meio"]):
-        await broadcast_ws({"tipo": "modo", "nome": "conversa"})
-    elif any(c in texto_lower for c in ["modo foco", "aumenta de tamanho", "fica maior"]):
-        await broadcast_ws({"tipo": "modo", "nome": "foco"})
-    elif any(c in texto_lower for c in ["canto esquerdo", "vai pra esquerda"]):
-        await broadcast_ws({"tipo": "modo", "nome": "canto_esquerdo"})
-    elif any(c in texto_lower for c in ["some da tela", "modo oculto", "oculta", "se esconde"]):
-        await broadcast_ws({"tipo": "modo", "nome": "oculto"})
-
     # 1. Verifica se é um comando explícito de memória ou uma intenção de execução real no Windows
     resposta_comando_local = memoria.processar_comando_explicito(texto_usuario)
     if not resposta_comando_local:
         from gideon.voz.comandos import interpretar_intencao_natural, detectar_comando_sistema
-        orc_local = obter_orquestrador()
+        contexto = orquestrador_voz.contexto_conversa if orquestrador_voz else {}
+        intencao = interpretar_intencao_natural(texto_usuario, contexto)
         if (
-            orc_local._confirmacao_pendente
+            (orquestrador_voz and orquestrador_voz._confirmacao_pendente)
             or detectar_comando_sistema(texto_usuario) is not None
-            or interpretar_intencao_natural(texto_usuario, orc_local.contexto_conversa) is not None
+            or intencao is not None
         ):
-            resposta_comando_local = orc_local.processar_fala_local_rapida(
+            resposta_comando_local = await asyncio.to_thread(
+                obter_orquestrador().processar_fala_local_rapida,
                 texto_usuario,
                 falar_feedback_imediato=False,
             )
@@ -294,24 +412,13 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
         historico_conversa.append({"role": "assistant", "content": resposta_comando_local})
 
         async def gerador_comando() -> AsyncGenerator[str, None]:
-            # Emite evento de início de fala para o avatar
-            await broadcast_ws({"tipo": "fala_inicio", "texto": resposta_comando_local})
-
-            # Extrai emoções do comando
-            try:
-                from gideon.protocolo import extrair_emocoes_texto
-                for _, emo in extrair_emocoes_texto(resposta_comando_local):
-                    await broadcast_ws({"tipo": "emocao", "nome": emo, "intensidade": 0.8})
-            except Exception:
-                pass
-
             # Transmite o texto do comando
             yield f"data: {json.dumps({'tipo': 'chunk', 'texto': resposta_comando_local}, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.05)
 
             # Transmite evento fim com 0 custo de API (executado localmente)
             yield f"data: {json.dumps({'tipo': 'fim', 'total_tokens': 0, 'custo_estimado': 0.0, 'modelo': 'executor_verificado'}, ensure_ascii=False)}\n\n"
-            await broadcast_ws({"tipo": "fala_fim"})
+            await broadcast_ws({"tipo": "pensando", "ativo": False})
 
         return StreamingResponse(
             gerador_comando(),
@@ -322,7 +429,7 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
     # 2. Se for pergunta comum, busca lembranças relevantes para injetar no cérebro
     lembrancas = memoria.recuperar_lembrancas_para_prompt(texto_usuario)
 
-    # Notifica o avatar que a Gideon está pensando
+    # Atualiza o avatar enquanto a resposta e gerada.
     await broadcast_ws({"tipo": "pensando", "ativo": True})
 
     async def gerador_eventos() -> AsyncGenerator[str, None]:
@@ -355,30 +462,10 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
                 if evento["tipo"] == "chunk":
                     texto_resposta.append(evento["texto"])
 
-                    # Na primeira palavra, notifica o avatar que a Gideon começou a falar
+                    # Na primeira palavra, a resposta deixa o estado de raciocinio.
                     if primeira_palavra:
                         await broadcast_ws({"tipo": "pensando", "ativo": False})
-                        await broadcast_ws({"tipo": "fala_inicio", "texto": ""})
                         primeira_palavra = False
-
-                    # Envia o texto para o avatar (para lip sync futuro)
-                    await broadcast_ws({
-                        "tipo": "fala_chunk",
-                        "texto": evento["texto"],
-                    })
-
-                    # Extrai emoções do texto, se houver
-                    try:
-                        from gideon.protocolo import extrair_emocoes_texto
-                        emocoes = extrair_emocoes_texto(evento["texto"])
-                        for _, emocao in emocoes:
-                            await broadcast_ws({
-                                "tipo": "emocao",
-                                "nome": emocao,
-                                "intensidade": 0.8,
-                            })
-                    except ImportError:
-                        pass
 
                 elif evento["tipo"] == "fim":
                     resposta_completa = "".join(texto_resposta)
@@ -391,10 +478,12 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
                     memoria.gravar_mensagem("voce", texto_usuario)
                     memoria.gravar_mensagem("assistente", resposta_completa)
 
-                    await broadcast_ws({"tipo": "fala_fim"})
+                    await broadcast_ws({"tipo": "pensando", "ativo": False})
+                    await broadcast_ws({"tipo": "som", "som": "conclusao"})
 
                 elif evento["tipo"] == "erro":
                     await broadcast_ws({"tipo": "pensando", "ativo": False})
+                    await broadcast_ws({"tipo": "som", "som": "erro"})
 
                 yield f"data: {json.dumps(evento, ensure_ascii=False)}\n\n"
 
@@ -416,67 +505,20 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
     )
 
 
-# ─── Controle do Avatar via HTTP (para testes e automações) ──
-
-@app.post("/api/avatar/emocao")
-async def definir_emocao(req: EmocaoRequisicao, _: bool = Depends(autenticar)):
-    """Envia uma emoção para o avatar."""
-    await broadcast_ws({
-        "tipo": "emocao",
-        "nome": req.nome,
-        "intensidade": req.intensidade,
-    })
-    return {"status": "ok"}
-
-
-@app.post("/api/avatar/modo")
-async def definir_modo(req: ModoRequisicao, _: bool = Depends(autenticar)):
-    """Altera o modo de exibição do avatar."""
-    await broadcast_ws({
-        "tipo": "modo",
-        "nome": req.modo,
-    })
-    return {"status": "ok"}
-
-
-@app.post("/api/avatar/config")
-async def configurar_holograma(req: ConfigHologramaRequisicao, _: bool = Depends(autenticar)):
-    """Configura presença do holograma no desktop (opacidade, escala, posição, click-through, FPS e estado_ia)."""
-    payload = {k: v for k, v in req.model_dump().items() if v is not None}
-    if "estado_ia" in payload:
-        await broadcast_ws({"tipo": "estado_ia", "estado": payload["estado_ia"]})
-    await broadcast_ws({"tipo": "config_holograma", **payload})
-    return {"status": "ok", "config_enviada": payload}
-
-
-@app.get("/api/avatar/telemetria")
-async def obter_telemetria_avatar(_: bool = Depends(autenticar)):
-    """Retorna a telemetria visual em tempo real do avatar Godot (FPS, estado comportamental, olhar, visema)."""
-    from gideon.presenca import inspecionar_janela_ativa_segura, obter_posicao_cursor_normalizada
-    return {
-        "status": "ok",
-        "avatar": _telemetria_avatar_atual,
-        "consciencia_desktop": {
-            "cursor": obter_posicao_cursor_normalizada(),
-            "janela_ativa": inspecionar_janela_ativa_segura(),
-        },
-    }
-
-
-# ─── WebSocket para o Avatar ──────────────────────────────────
+# ─── WebSocket do aplicativo ──────────────────────────────────
 
 @app.websocket("/ws")
-async def websocket_avatar(websocket: WebSocket):
-    """Conexão WebSocket bidirecional para o avatar (Godot ou Unreal Engine 5)."""
+async def websocket_app(websocket: WebSocket):
+    """Mantem o avatar do aplicativo sincronizado com voz e processamento."""
     origem = websocket.headers.get("origin")
-    token_header = websocket.headers.get("x-gideon-token")
-    token_query = websocket.query_params.get("token")
-    token_cookie = websocket.cookies.get("gideon_token")
-    token = token_header or token_query or token_cookie
-
-    if origem and origem not in ORIGENS_LOCAIS:
+    if origem and origem.rstrip("/") not in ORIGENS_LOCAIS:
         await websocket.close(code=4003, reason="Origem nao autorizada")
         return
+
+    token_header = websocket.headers.get("x-gideon-token")
+    token_cookie = websocket.cookies.get("gideon_token")
+    token_param = websocket.query_params.get("token")
+    token = token_header or token_cookie or token_param
     if not token or not token_valido(token, TOKEN_LOCAL):
         await websocket.close(code=4001, reason="Token inválido")
         return
@@ -495,6 +537,7 @@ async def websocket_avatar(websocket: WebSocket):
         "nome": "Gideon",
         "modelo": cerebro.modelo,
         "mensagens": len(historico_conversa),
+        "estado_interface": dict(_estado_interface),
     }, ensure_ascii=False))
 
     try:
@@ -504,25 +547,7 @@ async def websocket_avatar(websocket: WebSocket):
                 mensagem = json.loads(data)
                 tipo = mensagem.get("tipo", "")
 
-                if tipo == "pronto":
-                    print(f"  [WebSocket] Avatar '{cliente_id}' reportou pronto")
-
-                elif tipo == "clique_avatar":
-                    # Futuro: pode disparar o modo de conversa
-                    pass
-
-                elif tipo == "modo_mudou":
-                    modo = mensagem.get("modo", "")
-                    _telemetria_avatar_atual["modo"] = modo
-                    print(f"  [WebSocket] Modo do avatar: {modo}")
-
-                elif tipo == "telemetria_avatar":
-                    for k in ("fps", "estado_ia", "emocao", "visema_ativo", "olhar_x", "olhar_y", "modo"):
-                        if k in mensagem:
-                            _telemetria_avatar_atual[k] = mensagem[k]
-
-                # Outros eventos do avatar são logados
-                else:
+                if tipo != "pronto":
                     print(f"  [WebSocket] Evento de '{cliente_id}': {tipo}")
 
             except json.JSONDecodeError:
@@ -544,40 +569,87 @@ _lock_orquestrador = threading.Lock()
 
 
 def obter_orquestrador():
-    global orquestrador_voz
+    global orquestrador_voz, _estado_inicializacao_voz, _erro_inicializacao_voz
     if orquestrador_voz is None:
         with _lock_orquestrador:
             if orquestrador_voz is None:
-                from gideon.voz.orquestrador import OrquestradorVoz
-                def repassar(ev):
-                    if _loop_servidor and _loop_servidor.is_running():
-                        asyncio.run_coroutine_threadsafe(broadcast_ws(ev), _loop_servidor)
-                orquestrador_voz = OrquestradorVoz(cerebro, memoria, repassar)
+                _estado_inicializacao_voz = "inicializando"
+                try:
+                    from gideon.voz.orquestrador import OrquestradorVoz
+
+                    def repassar(ev):
+                        if ev.get("tipo") == "abrir_interface":
+                            from gideon.supervisor import sinalizar_abertura
+
+                            sinalizar_abertura()
+                        if _loop_servidor and _loop_servidor.is_running():
+                            asyncio.run_coroutine_threadsafe(
+                                broadcast_ws({**ev, "origem": "voz"}),
+                                _loop_servidor,
+                            )
+
+                    orquestrador_voz = OrquestradorVoz(cerebro, memoria, repassar)
+                    _estado_inicializacao_voz = "pronta"
+                    _erro_inicializacao_voz = None
+                except Exception as erro:
+                    _estado_inicializacao_voz = "falhou"
+                    _erro_inicializacao_voz = str(erro)[:160]
+                    raise
     return orquestrador_voz
+
+
+def _inicializar_voz_em_background(ativar: bool = True) -> None:
+    """Prepara os modelos de voz sem bloquear o servidor HTTP."""
+    global _estado_inicializacao_voz
+    with _lock_orquestrador:
+        if orquestrador_voz is not None:
+            if ativar:
+                threading.Thread(target=orquestrador_voz.iniciar, daemon=True).start()
+            return
+        if _estado_inicializacao_voz == "inicializando":
+            return
+        _estado_inicializacao_voz = "inicializando"
+
+    def preparar() -> None:
+        try:
+            orc = obter_orquestrador()
+            if ativar:
+                orc.iniciar()
+        except Exception as erro:
+            print(f"  [Gideon Voz] Falha ao inicializar: {erro}")
+
+    threading.Thread(target=preparar, daemon=True, name="gideon-init-voz").start()
 
 
 @app.post("/api/voz/iniciar")
 async def iniciar_voz(_: bool = Depends(autenticar)):
     """Inicia o ouvinte contínuo de voz (Wake Word 'Gideon')."""
-    orc = obter_orquestrador()
-    orc.iniciar()
+    if orquestrador_voz is None:
+        _inicializar_voz_em_background(ativar=True)
+        return {"status": "inicializando", "mensagem": "A voz esta sendo preparada."}
+    await asyncio.to_thread(orquestrador_voz.iniciar)
     return {"status": "ok", "mensagem": "Escuta por voz ativada."}
 
 
 @app.post("/api/voz/parar")
 async def parar_voz(_: bool = Depends(autenticar)):
     """Pausa a escuta contínua de voz."""
-    orc = obter_orquestrador()
-    orc.parar()
+    if orquestrador_voz is not None:
+        await asyncio.to_thread(orquestrador_voz.parar)
     return {"status": "ok", "mensagem": "Escuta por voz pausada."}
 
 
 @app.get("/api/voz/status")
 async def status_voz(_: bool = Depends(autenticar)):
     """Retorna o estado detalhado da escuta de voz, modo atual e sensibilidade."""
-    orc = obter_orquestrador()
-    cfg = orc.obter_configuracao()
-    return {"status": "ok", **cfg}
+    if orquestrador_voz is None:
+        return {
+            "status": "ok",
+            "inicializacao": _estado_inicializacao_voz,
+            "ativa": False,
+            "erro": _erro_inicializacao_voz,
+        }
+    return {"status": "ok", "inicializacao": "pronta", **orquestrador_voz.obter_configuracao()}
 
 
 class ConfiguracaoVozRequisicao(BaseModel):
@@ -591,8 +663,9 @@ class ConfiguracaoVozRequisicao(BaseModel):
 @app.post("/api/voz/configurar")
 async def configurar_voz(req: ConfiguracaoVozRequisicao, _: bool = Depends(autenticar)):
     """Configura modo de escuta (ativacao_por_nome, conversa_continua, conversa_livre), sensibilidade e sessão."""
-    orc = obter_orquestrador()
-    cfg = orc.configurar(
+    orc = await asyncio.to_thread(obter_orquestrador)
+    cfg = await asyncio.to_thread(
+        orc.configurar,
         modo_escuta=req.modo_escuta,
         duracao_sessao=req.duracao_sessao,
         sensibilidade=req.sensibilidade,
@@ -605,8 +678,7 @@ async def configurar_voz(req: ConfiguracaoVozRequisicao, _: bool = Depends(auten
 @app.post("/api/voz/interromper")
 async def interromper_voz(_: bool = Depends(autenticar)):
     """Interrompe imediatamente a fala atual da Gideon (Barge-In)."""
-    orc = obter_orquestrador()
-    interrompeu = orc.interromper_fala()
+    interrompeu = orquestrador_voz.interromper_fala() if orquestrador_voz else False
     return {"status": "ok", "interrompida": interrompeu}
 
 
@@ -642,7 +714,7 @@ def main():
 
     # Quando executado via pythonw.exe (sem janela preta), redireciona stdout/stderr para log
     if sys.stdout is None or sys.stderr is None:
-        caminho_log = ROOT_DIR / "dados" / "gideon_background.log"
+        caminho_log = DADOS_DIR / "gideon_background.log"
         caminho_log.parent.mkdir(parents=True, exist_ok=True)
         arquivo_log = open(caminho_log, "a", encoding="utf-8", buffering=1)
         if sys.stdout is None:
@@ -677,17 +749,68 @@ def main():
     async def ao_iniciar():
         global _loop_servidor
         _loop_servidor = asyncio.get_running_loop()
+
+        # Conecta e inicializa o motor de automações por relógio de parede
+        from gideon.automacoes import obter_motor
+        motor = obter_motor()
+
+        def _callback_notificar(texto: str, falar: bool, meta: dict):
+            memoria.gravar_mensagem("assistente", texto)
+            historico_conversa.append({"role": "assistant", "content": texto})
+            if _loop_servidor and _loop_servidor.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_ws({"tipo": "resposta_voz", "texto": texto, "automacao": True}),
+                    _loop_servidor,
+                )
+            if falar:
+                try:
+                    orc = obter_orquestrador()
+                    if orc and orc.sintetizador:
+                        orc.sintetizador.falar(texto)
+                except Exception:
+                    pass
+
+        def _callback_pensar(prompt_instrucao: str, usar_tools: bool) -> str:
+            partes = []
+            for ev in cerebro.pensar_stream([{"role": "user", "content": prompt_instrucao}], usar_ferramentas=usar_tools):
+                if ev.get("tipo") == "chunk":
+                    partes.append(ev.get("texto", ""))
+            return "".join(partes).strip()
+
+        motor.notificar = _callback_notificar
+        motor._pensar = _callback_pensar
+        motor.iniciar()
+
+        # Inicializa o vigilante proativo de sistema
+        from gideon.vigilante import obter_vigilante
+
+        def _notificar_vigilante(ev: dict):
+            if _loop_servidor and _loop_servidor.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast_ws(ev), _loop_servidor)
+
+        vigilante = obter_vigilante(
+            notificador=_notificar_vigilante,
+            fala_callback=lambda txt: _callback_notificar(txt, falar=True, meta={"origem": "vigilante"}),
+        )
+        vigilante.iniciar()
+
         if ativar_voz_ao_iniciar:
-            threading.Thread(
-                target=lambda: obter_orquestrador().iniciar(),
-                daemon=True,
-                name="gideon-init-voz",
-            ).start()
+            _inicializar_voz_em_background(ativar=True)
 
     @app.on_event("shutdown")
     async def ao_encerrar():
+        from gideon.automacoes import obter_motor
+        obter_motor().parar()
+        from gideon.vigilante import obter_vigilante
+        obter_vigilante().parar()
         if orquestrador_voz is not None and orquestrador_voz.ativo:
             orquestrador_voz.parar()
+        try:
+            from gideon.mcp import obter_gerenciador_mcp
+
+            obter_gerenciador_mcp().encerrar_todos()
+        except Exception:
+            pass
 
     config = uvicorn.Config(app, host="127.0.0.1", port=8000, reload=False, log_level="info")
     _uvicorn_server = uvicorn.Server(config)

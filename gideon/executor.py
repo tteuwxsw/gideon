@@ -13,15 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 import json
-from pathlib import Path
 import time
 from typing import Any, Callable
 import uuid
 
-from gideon.gate import RegistroFerramentas, Risco, registrar_auditoria, PARADO, gasto_diario_atual, LIMITE_DIARIO_USD
+from gideon.gate import RegistroFerramentas, Risco, registrar_auditoria, PARADO
+from gideon.caminhos import DADOS_DIR
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-LOG_EXECUCOES = ROOT_DIR / "dados" / "execucoes.jsonl"
+LOG_EXECUCOES = DADOS_DIR / "execucoes.jsonl"
 
 
 class EstadoExecucao(str, Enum):
@@ -71,6 +70,21 @@ def gravar_log_execucao(registro: ResultadoExecucao) -> None:
         pass
 
 
+
+def _registrar_auto_cura(nome_ferramenta: str, params: dict[str, Any], erro: str) -> None:
+    """Registra lição de auto-correção na memória permanente quando uma ferramenta falha."""
+    try:
+        from gideon.memoria import Memoria
+        Memoria().salvar_licao(
+            contexto=f"Ao executar a ferramenta '{nome_ferramenta}' com parâmetros {params}",
+            erro_detectado=str(erro),
+            solucao_ou_regra=f"A ferramenta '{nome_ferramenta}' falhou ({str(erro)[:80]}). Verificar parâmetros ou tentar caminho alternativo.",
+            sucesso=False,
+        )
+    except Exception:
+        pass
+
+
 class ExecutorConfiavel:
     """Executa ferramentas do catálogo exigindo validação de resultado e verificação real."""
 
@@ -83,7 +97,7 @@ class ExecutorConfiavel:
         parametros: dict[str, Any] | None = None,
         *,
         confirmado_pelo_usuario: bool = False,
-        auto_amarelo: bool = True,
+        auto_amarelo: bool = False,
         timeout_s: float = 10.0,
     ) -> ResultadoExecucao:
         params = dict(parametros or {})
@@ -98,20 +112,7 @@ class ExecutorConfiavel:
                 estado=EstadoExecucao.FAILED,
                 verificado=False,
                 erros=["Sistema parado pelo comando de emergência."],
-                mensagem_humana="Meus sistemas de execução estão pausados por segurança, Henry.",
-            )
-            gravar_log_execucao(res)
-            return res
-
-        if gasto_diario_atual() >= LIMITE_DIARIO_USD:
-            res = ResultadoExecucao(
-                id_acao=id_acao,
-                ferramenta=nome_ferramenta,
-                parametros=params,
-                estado=EstadoExecucao.FAILED,
-                verificado=False,
-                erros=[f"Teto diário de gasto atingido (${LIMITE_DIARIO_USD:.2f} USD)."],
-                mensagem_humana="O limite diário de uso foi atingido, Henry.",
+                mensagem_humana="Meus sistemas de execução estão pausados por segurança, Senhor Henry.",
             )
             gravar_log_execucao(res)
             return res
@@ -125,7 +126,7 @@ class ExecutorConfiavel:
                 estado=EstadoExecucao.UNSUPPORTED,
                 verificado=False,
                 erros=[f"Ferramenta '{nome_ferramenta}' não existe no catálogo autorizado."],
-                mensagem_humana="Ainda não possuo uma ferramenta autorizada para realizar essa ação específica, Henry.",
+                mensagem_humana="Ainda não possuo uma ferramenta autorizada para realizar essa ação específica, Senhor Henry.",
             )
             gravar_log_execucao(res)
             return res
@@ -135,9 +136,10 @@ class ExecutorConfiavel:
         except Exception:
             texto_acao = f"{ferramenta.nome}({params})"
 
+        risco_efetivo = ferramenta.risco_para(params)
         precisa_confirmar = (
-            ferramenta.risco is Risco.VERMELHO
-            or (ferramenta.risco is Risco.AMARELO and not auto_amarelo)
+            risco_efetivo is Risco.VERMELHO
+            or (risco_efetivo is Risco.AMARELO and not auto_amarelo)
         )
         if precisa_confirmar and not confirmado_pelo_usuario:
             res = ResultadoExecucao(
@@ -146,15 +148,17 @@ class ExecutorConfiavel:
                 parametros=params,
                 estado=EstadoExecucao.NEEDS_CONFIRMATION,
                 verificado=False,
-                evidencias={"risco": ferramenta.risco.value, "descricao_acao": texto_acao},
+                evidencias={"risco": risco_efetivo.value, "descricao_acao": texto_acao},
                 duracao_ms=round((time.perf_counter() - t0) * 1000.0, 1),
-                mensagem_humana=f"Para {texto_acao}, preciso da sua confirmação, Henry. Posso prosseguir?",
+                mensagem_humana=f"Para {texto_acao}, preciso da sua confirmação, Senhor Henry. Posso prosseguir?",
             )
             gravar_log_execucao(res)
             return res
 
         # Executa a ferramenta e interpreta o retorno estruturado
         try:
+            if PARADO.is_set():
+                raise RuntimeError("Sistema parado pelo comando de emergência.")
             saida_bruta = ferramenta.executar(**params)
         except TimeoutError as e:
             duracao = round((time.perf_counter() - t0) * 1000.0, 1)
@@ -166,9 +170,10 @@ class ExecutorConfiavel:
                 verificado=False,
                 erros=[str(e)],
                 duracao_ms=duracao,
-                mensagem_humana=f"A tentativa de {texto_acao} excedeu o tempo limite, Henry.",
+                mensagem_humana=f"A tentativa de {texto_acao} excedeu o tempo limite, Senhor Henry.",
             )
             gravar_log_execucao(res)
+            _registrar_auto_cura(nome_ferramenta, params, str(e))
             registrar_auditoria({
                 "id_acao": id_acao,
                 "ferramenta": nome_ferramenta,
@@ -212,6 +217,9 @@ class ExecutorConfiavel:
             duracao_ms=duracao,
         )
 
+        if res.estado == EstadoExecucao.FAILED:
+            _registrar_auto_cura(nome_ferramenta, params, res.erros[0] if res.erros else "falha de verificação")
+
         gravar_log_execucao(res)
         registrar_auditoria({
             "id_acao": id_acao,
@@ -235,9 +243,15 @@ class ExecutorConfiavel:
         duracao_ms: float,
     ) -> ResultadoExecucao:
         """Inspeciona o retorno da ferramenta e garante que erros internos nunca virem falso sucesso."""
+        ferramenta = self.catalogo.obter(nome_ferramenta)
+        risco = ferramenta.risco if ferramenta else Risco.VERMELHO
+
         if isinstance(saida, ResultadoExecucao):
             saida.id_acao = id_acao
             saida.duracao_ms = duracao_ms
+            if saida.estado is EstadoExecucao.SUCCESS and not saida.verificado:
+                saida.estado = EstadoExecucao.FAILED
+                saida.erros.append("A ferramenta informou sucesso sem verificacao.")
             return saida
 
         if isinstance(saida, dict):
@@ -276,7 +290,7 @@ class ExecutorConfiavel:
                     mensagem_humana=saida.get("mensagem_humana") or erro_msg,
                 )
 
-            verificado = bool(saida.get("verificado", True))
+            verificado = bool(saida.get("verificado", risco is Risco.VERDE))
             evidencias = saida.get("evidencias", {})
             if not evidencias and any(k in saida for k in ("pid", "hwnd", "caminho", "cpu_percent", "modelo", "arquivos")):
                 evidencias = {
@@ -284,6 +298,24 @@ class ExecutorConfiavel:
                     for k in ("pid", "hwnd", "titulo_janela", "caminho", "cpu_percent", "modelo", "total_encontrados")
                     if k in saida
                 }
+
+            if not verificado or (
+                risco is not Risco.VERDE
+                and (saida.get("sucesso") is not True or not evidencias)
+            ):
+                erro_msg = str(saida.get("mensagem_humana") or "A execucao nao apresentou evidencia verificavel.")
+                return ResultadoExecucao(
+                    id_acao=id_acao,
+                    ferramenta=nome_ferramenta,
+                    parametros=params,
+                    estado=EstadoExecucao.FAILED,
+                    verificado=False,
+                    resultado=saida,
+                    erros=[erro_msg],
+                    evidencias=evidencias,
+                    duracao_ms=duracao_ms,
+                    mensagem_humana=erro_msg,
+                )
 
             return ResultadoExecucao(
                 id_acao=id_acao,
@@ -311,6 +343,18 @@ class ExecutorConfiavel:
                     duracao_ms=duracao_ms,
                     mensagem_humana=saida,
                 )
+            if risco is not Risco.VERDE:
+                return ResultadoExecucao(
+                    id_acao=id_acao,
+                    ferramenta=nome_ferramenta,
+                    parametros=params,
+                    estado=EstadoExecucao.FAILED,
+                    verificado=False,
+                    resultado=saida,
+                    erros=["A ferramenta modificadora retornou texto sem evidencia verificavel."],
+                    duracao_ms=duracao_ms,
+                    mensagem_humana=saida,
+                )
             return ResultadoExecucao(
                 id_acao=id_acao,
                 ferramenta=nome_ferramenta,
@@ -324,6 +368,18 @@ class ExecutorConfiavel:
             )
 
         if isinstance(saida, list):
+            if risco is not Risco.VERDE:
+                return ResultadoExecucao(
+                    id_acao=id_acao,
+                    ferramenta=nome_ferramenta,
+                    parametros=params,
+                    estado=EstadoExecucao.FAILED,
+                    verificado=False,
+                    resultado=saida,
+                    erros=["A ferramenta modificadora retornou uma lista sem evidencia verificavel."],
+                    duracao_ms=duracao_ms,
+                    mensagem_humana="A acao nao apresentou evidencia verificavel.",
+                )
             return ResultadoExecucao(
                 id_acao=id_acao,
                 ferramenta=nome_ferramenta,
@@ -340,11 +396,12 @@ class ExecutorConfiavel:
             id_acao=id_acao,
             ferramenta=nome_ferramenta,
             parametros=params,
-            estado=EstadoExecucao.SUCCESS,
-            verificado=True,
+            estado=EstadoExecucao.FAILED,
+            verificado=False,
             resultado=saida,
+            erros=["A ferramenta retornou um formato sem evidencia verificavel."],
             duracao_ms=duracao_ms,
-            mensagem_humana="Ação concluída.",
+            mensagem_humana="Nao consegui verificar o resultado da acao.",
         )
 
     def executar_plano(

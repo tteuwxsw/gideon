@@ -18,6 +18,7 @@ from typing import Any
 import psutil
 
 from gideon.gate import Ferramenta, Risco
+from gideon.processos_windows import comando_powershell, opcoes_processo_oculto
 
 # Processos comuns de sistema que filtramos da lista de programas do usuário
 PROCESSOS_IGNORADOS = {
@@ -34,11 +35,11 @@ PROCESSOS_IGNORADOS = {
 psutil.cpu_percent(interval=None)
 
 _CACHE_GPU: dict[str, Any] = {
-    "modelo": "AMD Radeon RX 580X",
-    "vram": "8 GB GDDR5",
-    "uso_3d": "Operando normalmente",
-    "status": "OK",
-    "adaptadores": [{"modelo": "AMD Radeon RX 580X", "vram_total": "8 GB GDDR5", "status": "OK"}],
+    "modelo": "Não identificado",
+    "vram": "Não informado",
+    "uso_3d": "Não disponível",
+    "status": "Aguardando coleta",
+    "adaptadores": [],
 }
 _CACHE_GPU_TS: float = 0.0
 _ATUALIZANDO_GPU: bool = False
@@ -55,24 +56,23 @@ def _atualizar_gpu_background() -> None:
             "ConvertTo-Json -Compress"
         )
         res = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", comando],
+            [comando_powershell(), "-NoProfile", "-NonInteractive", "-Command", comando],
             capture_output=True,
             text=True,
             timeout=3.5,
+            **opcoes_processo_oculto(),
         )
         if res.returncode == 0 and res.stdout.strip():
             dados = json.loads(res.stdout.strip())
             if isinstance(dados, dict):
                 dados = [dados]
             for item in dados:
-                nome = str(item.get("Name") or "AMD Radeon RX 580").strip()
+                nome = str(item.get("Name") or "Adaptador de vídeo").strip()
                 ram_bytes = item.get("AdapterRAM") or 0
-                if "rx 580" in nome.lower() or "radeon" in nome.lower():
-                    vram_gb = "8 GB GDDR5" if ram_bytes >= 4_000_000_000 else f"{max(1, round(ram_bytes / (1024**3)))} GB"
-                elif ram_bytes > 0:
+                if ram_bytes > 0:
                     vram_gb = f"{max(1, round(ram_bytes / (1024**3)))} GB"
                 else:
-                    vram_gb = "Integrada / Compartilhada"
+                    vram_gb = "Não informado"
                 gpus.append({
                     "modelo": nome,
                     "vram_total": vram_gb,
@@ -225,37 +225,26 @@ def listar_janelas_visiveis() -> list[dict[str, Any]]:
 
 
 def inspecionar_contexto_tela() -> dict[str, Any]:
-    """Inspeciona a janela ativa e as janelas abertas na tela do Henry respeitando privacidade."""
-    from gideon.presenca import inspecionar_janela_ativa_segura, obter_posicao_cursor_normalizada
+    """Inspeciona sob demanda a janela ativa, respeitando os filtros de privacidade."""
+    from gideon.presenca import inspecionar_janela_ativa_segura
 
     janela_ativa = inspecionar_janela_ativa_segura()
-    cursor = obter_posicao_cursor_normalizada()
-    janelas = listar_janelas_visiveis()
-    titulos_abertos = [
-        j["titulo"]
-        for j in janelas
-        if "godot" not in (j.get("processo") or "").lower()
-    ][:6]
 
     titulo_principal = janela_ativa.get("titulo") or "Área de Trabalho"
     proc_principal = janela_ativa.get("processo") or "explorer.exe"
     if janela_ativa.get("protegida_privacidade"):
-        msg = "Vejo que você está em uma janela protegida por privacidade, Henry. Por segurança, não leio o conteúdo dela."
+        msg = "A janela em foco está protegida por privacidade. O título e o processo não foram expostos."
     else:
-        outros = f" Além dela, estão abertas: {', '.join(titulos_abertos[1:4])}." if len(titulos_abertos) > 1 else ""
-        msg = f"No momento, a janela em foco na sua tela é '{titulo_principal}' ({proc_principal}).{outros}"
+        msg = f"No momento, a janela em foco é '{titulo_principal}' ({proc_principal})."
 
     return {
         "sucesso": True,
         "verificado": True,
         "janela_ativa": janela_ativa,
-        "cursor": cursor,
-        "janelas_visiveis": titulos_abertos,
         "evidencias": {
             "hwnd_ativo": janela_ativa.get("hwnd"),
             "titulo_ativo": titulo_principal,
             "processo_ativo": proc_principal,
-            "total_janelas_visiveis": len(janelas),
         },
         "mensagem_humana": msg,
     }
@@ -814,16 +803,13 @@ def gerenciar_janela(acao: str, alvo: str = "") -> dict[str, Any]:
                 "mensagem_humana": f"Não encontrei nenhuma janela aberta do {alvo}, Henry.",
             }
     else:
-        # Usa a janela ativa atual (ignorando overlay do Godot da própria Gideon)
+        # Usa a janela ativa atual; se não houver uma, seleciona a primeira visível.
         for j in janelas:
-            if j["ativa"] and "godot" not in (j["processo"] or "").lower():
+            if j["ativa"]:
                 janela_escolhida = j
                 break
         if janela_escolhida is None and janelas:
-            for j in janelas:
-                if "godot" not in (j["processo"] or "").lower():
-                    janela_escolhida = j
-                    break
+            janela_escolhida = janelas[0]
 
     if janela_escolhida is None:
         return {
@@ -1283,7 +1269,7 @@ def encerrar_gideon() -> str:
 
 
 def reiniciar_gideon() -> dict[str, Any]:
-    """Solicita ao supervisor o reinício completo da Gideon (backend e holograma)."""
+    """Solicita ao supervisor o reinício completo da aplicação Gideon."""
     from gideon.supervisor import sinalizar_reinicio, supervisor_ativo
 
     if not supervisor_ativo():
@@ -1343,13 +1329,15 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.VERDE,
         executar=obter_status_pc,
         frase=lambda **kwargs: "consultar o uso de recursos de CPU, RAM, GPU e disco do computador",
+        parametros={"type": "object", "properties": {}},
     ),
     Ferramenta(
         nome="obter_status_gpu",
-        descricao="Obtém informações detalhadas da placa de vídeo (GPU), modelo (ex: AMD Radeon RX 580), VRAM e uso 3D.",
+        descricao="Obtém informações da placa de vídeo (GPU), incluindo modelo, VRAM e estado operacional.",
         risco=Risco.VERDE,
         executar=obter_status_gpu,
         frase=lambda **kwargs: "consultar o status da placa de vídeo (GPU)",
+        parametros={"type": "object", "properties": {}},
     ),
     Ferramenta(
         nome="listar_programas_usuario",
@@ -1357,6 +1345,7 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.VERDE,
         executar=listar_programas_usuario,
         frase=lambda **kwargs: "listar os programas ativos no computador",
+        parametros={"type": "object", "properties": {}},
     ),
     Ferramenta(
         nome="listar_janelas_visiveis",
@@ -1364,6 +1353,7 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.VERDE,
         executar=listar_janelas_visiveis,
         frase=lambda **kwargs: "listar as janelas visíveis no Windows",
+        parametros={"type": "object", "properties": {}},
     ),
     Ferramenta(
         nome="inspecionar_contexto_tela",
@@ -1371,6 +1361,7 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.VERDE,
         executar=inspecionar_contexto_tela,
         frase=lambda **kwargs: "analisar a janela ativa e o contexto atual da tela",
+        parametros={"type": "object", "properties": {}},
     ),
     Ferramenta(
         nome="abrir_programa",
@@ -1378,6 +1369,13 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=abrir_programa,
         frase=lambda nome, **kwargs: f"abrir o programa '{nome}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "nome": {"type": "string", "description": "Nome ou atalho do aplicativo (ex: 'chrome', 'vscode', 'spotify', 'notepad', 'calculadora')"},
+            },
+            "required": ["nome"],
+        },
     ),
     Ferramenta(
         nome="fechar_programa",
@@ -1385,6 +1383,13 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=fechar_programa,
         frase=lambda nome, **kwargs: f"fechar o programa '{nome}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "nome": {"type": "string", "description": "Nome do programa ou parte do título da janela a fechar"},
+            },
+            "required": ["nome"],
+        },
     ),
     Ferramenta(
         nome="gerenciar_janela",
@@ -1392,6 +1397,14 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=gerenciar_janela,
         frase=lambda acao, alvo="", **kwargs: f"{acao} a janela '{alvo or 'ativa'}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "acao": {"type": "string", "description": "Ação a executar ('minimizar', 'maximizar', 'restaurar', 'focar')"},
+                "alvo": {"type": "string", "description": "Nome do app ou parte do título da janela (deixe vazio para a janela ativa)", "default": ""},
+            },
+            "required": ["acao"],
+        },
     ),
     Ferramenta(
         nome="pesquisar_navegador",
@@ -1399,6 +1412,14 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=pesquisar_navegador,
         frase=lambda consulta, motor="google", **kwargs: f"pesquisar '{consulta}' no {motor}",
+        parametros={
+            "type": "object",
+            "properties": {
+                "consulta": {"type": "string", "description": "Termo de busca"},
+                "motor": {"type": "string", "description": "'google' ou 'youtube'", "default": "google"},
+            },
+            "required": ["consulta"],
+        },
     ),
     Ferramenta(
         nome="tocar_ou_pesquisar_midia",
@@ -1406,6 +1427,14 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=tocar_ou_pesquisar_midia,
         frase=lambda consulta, plataforma="spotify", **kwargs: f"buscar '{consulta}' no {plataforma}",
+        parametros={
+            "type": "object",
+            "properties": {
+                "consulta": {"type": "string", "description": "Nome da música, artista, álbum ou vídeo"},
+                "plataforma": {"type": "string", "description": "'spotify', 'youtube' ou 'google'", "default": "spotify"},
+            },
+            "required": ["consulta"],
+        },
     ),
     Ferramenta(
         nome="controlar_midia",
@@ -1413,6 +1442,16 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.VERDE,
         executar=controlar_midia,
         frase=lambda acao, **kwargs: f"executar controle de mídia '{acao}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "acao": {
+                    "type": "string",
+                    "description": "'pausar', 'continuar', 'proxima', 'anterior', 'aumentar_volume', 'diminuir_volume', 'mudo'",
+                },
+            },
+            "required": ["acao"],
+        },
     ),
     Ferramenta(
         nome="digitar_texto",
@@ -1420,6 +1459,15 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=digitar_texto,
         frase=lambda texto, janela_alvo="", **kwargs: f"digitar '{texto}' na janela '{janela_alvo or 'ativa'}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "texto": {"type": "string", "description": "Texto a ser digitado"},
+                "janela_alvo": {"type": "string", "description": "Título da janela alvo (opcional)", "default": ""},
+                "pressionar_enter": {"type": "boolean", "description": "Pressionar Enter após digitar", "default": False},
+            },
+            "required": ["texto"],
+        },
     ),
     Ferramenta(
         nome="executar_atalho_teclado",
@@ -1427,6 +1475,14 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=executar_atalho_teclado,
         frase=lambda atalho, **kwargs: f"executar o atalho de teclado '{atalho}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "atalho": {"type": "string", "description": "Atalho a pressionar (ex: 'ctrl+s', 'alt+tab', 'f5')"},
+                "janela_alvo": {"type": "string", "description": "Janela alvo (opcional)", "default": ""},
+            },
+            "required": ["atalho"],
+        },
     ),
     Ferramenta(
         nome="clicar_mouse",
@@ -1434,6 +1490,15 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=clicar_mouse,
         frase=lambda x=None, y=None, botao="esquerdo", **kwargs: f"clicar com o botão {botao} do mouse",
+        parametros={
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer", "description": "Coordenada X (opcional)"},
+                "y": {"type": "integer", "description": "Coordenada Y (opcional)"},
+                "botao": {"type": "string", "description": "'esquerdo' ou 'direito'", "default": "esquerdo"},
+                "duplo": {"type": "boolean", "description": "Clique duplo", "default": False},
+            },
+        },
     ),
     Ferramenta(
         nome="bloquear_estacao",
@@ -1441,20 +1506,25 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.AMARELO,
         executar=bloquear_estacao,
         frase=lambda **kwargs: "bloquear a tela do computador",
+        parametros={"type": "object", "properties": {}},
     ),
     Ferramenta(
         nome="encerrar_gideon",
-        descricao="Encerra e desliga completamente todos os processos e o holograma da Gideon quando o Henry pedir para fechar.",
+        descricao="Encerra e desliga completamente os processos da aplicação Gideon quando o Henry pedir para fechar.",
         risco=Risco.VERMELHO,
         executar=encerrar_gideon,
         frase=lambda **kwargs: "encerrar e fechar a Gideon completamente",
+        parametros={"type": "object", "properties": {}},
+        expor_ao_modelo=False,
     ),
     Ferramenta(
         nome="reiniciar_gideon",
-        descricao="Reinicia automaticamente o backend e o holograma da Gideon, reabrindo-a na tela em segundos.",
+        descricao="Reinicia automaticamente os componentes da aplicação Gideon.",
         risco=Risco.VERMELHO,
         executar=reiniciar_gideon,
         frase=lambda **kwargs: "reiniciar os sistemas da Gideon",
+        parametros={"type": "object", "properties": {}},
+        expor_ao_modelo=False,
     ),
     Ferramenta(
         nome="atualizar_sistemas",
@@ -1462,5 +1532,7 @@ FERRAMENTAS_SISTEMA = [
         risco=Risco.VERMELHO,
         executar=atualizar_sistemas,
         frase=lambda **kwargs: "verificar e aplicar atualizações no repositório Git",
+        parametros={"type": "object", "properties": {}},
+        expor_ao_modelo=False,
     ),
 ]

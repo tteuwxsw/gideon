@@ -12,8 +12,9 @@ from typing import Any
 import numpy as np
 import psutil
 
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-ARQUIVO_METRICAS = ROOT_DIR / "dados" / "metricas_voz.jsonl"
+from gideon.caminhos import DADOS_DIR
+
+ARQUIVO_METRICAS = DADOS_DIR / "metricas_voz.jsonl"
 
 
 @dataclass

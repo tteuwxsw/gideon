@@ -7,16 +7,17 @@ Classificação de ferramentas:
 """
 
 import json
+import math
 import time
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Any, Callable
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DADOS_DIR = ROOT_DIR / "dados"
+from gideon.caminhos import DADOS_DIR
+
 LOG_AUDITORIA = DADOS_DIR / "auditoria.jsonl"
+ARQUIVO_GASTO = DADOS_DIR / "gasto_diario.json"
 LIMITE_DIARIO_USD = 2.00
 
 # Evento global de parada de emergência
@@ -25,6 +26,29 @@ PARADO = threading.Event()
 # Controle de gasto diário
 _gasto_hoje = {"dia": "", "usd": 0.0}
 _lock_gasto = threading.Lock()
+
+
+def _carregar_gasto_locked() -> None:
+    hoje = time.strftime("%Y-%m-%d")
+    if _gasto_hoje["dia"] == hoje:
+        return
+
+    gasto = 0.0
+    try:
+        dados = json.loads(ARQUIVO_GASTO.read_text(encoding="utf-8"))
+        valor = float(dados.get("usd", 0.0))
+        if dados.get("dia") == hoje and math.isfinite(valor) and valor >= 0:
+            gasto = valor
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    _gasto_hoje.update(dia=hoje, usd=gasto)
+
+
+def _persistir_gasto_locked() -> None:
+    ARQUIVO_GASTO.parent.mkdir(parents=True, exist_ok=True)
+    temporario = ARQUIVO_GASTO.with_suffix(".tmp")
+    temporario.write_text(json.dumps(_gasto_hoje), encoding="utf-8")
+    temporario.replace(ARQUIVO_GASTO)
 
 
 class Risco(str, Enum):
@@ -41,6 +65,22 @@ class Ferramenta:
     executar: Callable[..., Any]
     frase: Callable[..., str]
     parametros: dict[str, Any] = field(default_factory=dict)
+    # Risco calculado pelos parametros reais (ex.: ligar automacao com acoes vermelhas).
+    # Nunca pode rebaixar o risco declarado em `risco`.
+    risco_dinamico: Callable[..., Risco] | None = None
+    # Ferramentas que so podem ser acionadas por comando explicito (regex/voz), nunca pelo modelo.
+    expor_ao_modelo: bool = True
+
+    def risco_para(self, params: dict[str, Any] | None = None) -> Risco:
+        """Retorna o risco efetivo para estes parametros (o maior entre o fixo e o dinamico)."""
+        if self.risco_dinamico is None:
+            return self.risco
+        try:
+            dinamico = self.risco_dinamico(**dict(params or {}))
+        except Exception:
+            return Risco.VERMELHO
+        ordem = {Risco.VERDE: 0, Risco.AMARELO: 1, Risco.VERMELHO: 2}
+        return dinamico if ordem.get(dinamico, 2) > ordem[self.risco] else self.risco
 
 
 def registrar_auditoria(evento: dict[str, Any]) -> None:
@@ -53,19 +93,28 @@ def registrar_auditoria(evento: dict[str, Any]) -> None:
 
 def somar_gasto(usd: float) -> None:
     """Acumula o gasto diário de API para controle do teto."""
-    hoje = time.strftime("%Y-%m-%d")
+    if not math.isfinite(usd) or usd < 0:
+        raise ValueError("O custo deve ser um numero finito e nao negativo.")
     with _lock_gasto:
-        if _gasto_hoje["dia"] != hoje:
-            _gasto_hoje.update(dia=hoje, usd=0.0)
+        _carregar_gasto_locked()
         _gasto_hoje["usd"] += usd
+        _persistir_gasto_locked()
 
 
 def gasto_diario_atual() -> float:
-    hoje = time.strftime("%Y-%m-%d")
     with _lock_gasto:
-        if _gasto_hoje["dia"] == hoje:
-            return _gasto_hoje["usd"]
-        return 0.0
+        _carregar_gasto_locked()
+        return _gasto_hoje["usd"]
+
+
+def ativar_parada_emergencia() -> None:
+    """Bloqueia novas execucoes de ferramentas imediatamente."""
+    PARADO.set()
+
+
+def retomar_execucao() -> None:
+    """Libera novamente o executor apos uma parada explicita."""
+    PARADO.clear()
 
 
 def obter_historico_auditoria(limite: int = 10) -> list[dict[str, Any]]:
@@ -102,14 +151,11 @@ class RegistroFerramentas:
         nome: str,
         args: dict[str, Any],
         confirmar_fn: Callable[[str], bool] | None = None,
-        auto_amarelo: bool = True,
+        auto_amarelo: bool = False,
     ) -> dict[str, Any]:
         """Executa uma ferramenta passando pelo portão de risco e auditoria."""
         if PARADO.is_set():
             return {"ok": False, "motivo": "Sistema parado pelo comando de emergência."}
-
-        if gasto_diario_atual() >= LIMITE_DIARIO_USD:
-            return {"ok": False, "motivo": f"Teto diário de gasto atingido (${LIMITE_DIARIO_USD:.2f} USD)."}
 
         f = self.obter(nome)
         if not f:
@@ -120,8 +166,9 @@ class RegistroFerramentas:
         except Exception as e:
             texto_acao = f"{f.nome} com argumentos {args}"
 
-        # Avaliação de risco
-        precisa_confirmar = f.risco is Risco.VERMELHO or (f.risco is Risco.AMARELO and not auto_amarelo)
+        # Avaliação de risco (considera o risco calculado pelos parâmetros reais)
+        risco_efetivo = f.risco_para(args)
+        precisa_confirmar = risco_efetivo is Risco.VERMELHO or (risco_efetivo is Risco.AMARELO and not auto_amarelo)
 
         if precisa_confirmar:
             if not confirmar_fn or not confirmar_fn(texto_acao):
@@ -135,6 +182,8 @@ class RegistroFerramentas:
 
         # Execução real com verificação obrigatória do retorno estruturado
         try:
+            if PARADO.is_set():
+                raise RuntimeError("Sistema parado pelo comando de emergência.")
             saida = f.executar(**args)
             if isinstance(saida, dict) and (
                 ("erro" in saida and saida["erro"])
@@ -148,6 +197,17 @@ class RegistroFerramentas:
                     or "Execução não verificada."
                 )
                 resultado = {"ok": False, "motivo": motivo_erro, "saida": saida}
+            elif f.risco is not Risco.VERDE and (
+                not isinstance(saida, dict)
+                or saida.get("sucesso") is not True
+                or saida.get("verificado") is not True
+                or not saida.get("evidencias")
+            ):
+                resultado = {
+                    "ok": False,
+                    "motivo": "A ferramenta modificadora nao apresentou evidencia verificavel.",
+                    "saida": saida,
+                }
             elif isinstance(saida, str) and saida.lower().startswith(
                 ("falha", "erro", "não foi possível", "nao foi possivel", "acesso negado")
             ):

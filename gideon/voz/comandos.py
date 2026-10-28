@@ -15,6 +15,32 @@ def normalizar(texto: str) -> str:
     )
 
 
+def eh_pedido_abrir_interface(texto: str) -> bool:
+    """Reconhece pedidos explicitos para mostrar a propria interface da Gideon."""
+    t = re.sub(r"[^a-z0-9 ]", " ", normalizar(texto))
+    t = " ".join(t.split())
+    return t in {
+        "abre o app",
+        "abra o app",
+        "abre o app pra mim",
+        "abra o app pra mim",
+        "abre o aplicativo",
+        "abra o aplicativo",
+        "abre o aplicativo pra mim",
+        "abra o aplicativo pra mim",
+        "abre a gideon",
+        "abra a gideon",
+        "mostra a gideon",
+        "mostre a gideon",
+        "abre sua interface",
+        "abra sua interface",
+        "mostra sua interface",
+        "mostre sua interface",
+        "aparece na tela",
+        "apareca na tela",
+        "quero ver a gideon",
+    }
+
 def detectar_comando_sistema(texto: str) -> str | None:
     """Detecta comandos críticos (Portão Vermelho) que exigem confirmação."""
     texto_norm = normalizar(texto)
@@ -308,7 +334,7 @@ def interpretar_intencao_natural(
     if eh_desistencia_rapida(texto):
         return {
             "acao": "cancelar_fluxo",
-            "resposta_direta": "[EMOCAO:neutra] Tudo bem.",
+            "resposta_direta": "Tudo bem.",
             "novo_contexto": {"aguardando_escolha_midia": False, "aguardando_pesquisa_web": False},
         }
 
@@ -330,7 +356,7 @@ def interpretar_intencao_natural(
         if resposta_confirmacao(texto) is False:
             return {
                 "acao": "nenhuma",
-                "resposta_direta": "[EMOCAO:neutra] Tudo bem.",
+                "resposta_direta": "Tudo bem.",
                 "novo_contexto": {"aguardando_pesquisa_web": False},
             }
         termo_busca = extrair_termo_pesquisa(texto)
@@ -351,7 +377,7 @@ def interpretar_intencao_natural(
         if resposta_confirmacao(texto) is False:
             return {
                 "acao": "nenhuma",
-                "resposta_direta": "[EMOCAO:neutra] Tudo bem.",
+                "resposta_direta": "Tudo bem.",
                 "novo_contexto": {"aguardando_escolha_midia": False},
             }
         termo = extrair_termo_midia(texto)
@@ -375,7 +401,7 @@ def interpretar_intencao_natural(
         motor = "youtube" if "youtube" in t_limpo else "google"
         return {
             "acao": "perguntar_pesquisa",
-            "resposta_direta": f"[EMOCAO:amigavel] Claro. O que você gostaria de pesquisar no {motor.capitalize()}?",
+            "resposta_direta": f"Claro. O que você gostaria de pesquisar no {motor.capitalize()}?",
             "novo_contexto": {
                 "aguardando_pesquisa_web": True,
                 "motor_pesquisa": motor,
@@ -390,7 +416,7 @@ def interpretar_intencao_natural(
         plataforma = "spotify" if ctx.get("ultimo_app") == "spotify" else "spotify"
         return {
             "acao": "perguntar_midia",
-            "resposta_direta": "[EMOCAO:amigavel] Claro. O que gostaria de ouvir?",
+            "resposta_direta": "Claro. O que gostaria de ouvir?",
             "novo_contexto": {
                 "aguardando_escolha_midia": True,
                 "plataforma_midia": plataforma,
@@ -623,7 +649,7 @@ def interpretar_intencao_natural(
             }
         return {
             "acao": "esclarecer",
-            "resposta_direta": "[EMOCAO:curiosidade] O que você gostaria que eu abrisse, Henry?",
+            "resposta_direta": "O que você gostaria que eu abrisse, Henry?",
             "novo_contexto": {},
         }
 
@@ -687,11 +713,11 @@ def interpretar_intencao_natural(
     ):
         recurso = ctx.get("ultimo_recurso", "geral")
         if recurso == "gpu":
-            resp_norm = "[EMOCAO:amigavel] Sim, Henry. Sua RX 580 com 8 GB está operando em temperatura e carga perfeitamente normais."
+            resp_norm = "Sim, Henry. Sua RX 580 com 8 GB está operando em temperatura e carga perfeitamente normais."
         elif recurso == "ram":
-            resp_norm = "[EMOCAO:amigavel] Sim, está dentro do esperado para o Windows com seus aplicativos abertos."
+            resp_norm = "Sim, está dentro do esperado para o Windows com seus aplicativos abertos."
         else:
-            resp_norm = "[EMOCAO:amigavel] Sim, Henry. Todos os indicadores de uso estão saudáveis e dentro do normal."
+            resp_norm = "Sim, Henry. Todos os indicadores de uso estão saudáveis e dentro do normal."
         return {
             "acao": "avaliacao_contextual",
             "resposta_direta": resp_norm,
@@ -716,14 +742,14 @@ def interpretar_intencao_natural(
         if conf_diag is False:
             return {
                 "acao": "nenhuma",
-                "resposta_direta": "[EMOCAO:neutra] Tudo bem, Henry. Qualquer coisa me avise.",
+                "resposta_direta": "Tudo bem, Henry. Qualquer coisa me avise.",
                 "novo_contexto": {"aguardando_confirmacao_diagnostico": False, "aguardando_sintoma_pc": False},
             }
 
     if re.search(r"\b(meu computador ta estranho|meu pc ta estranho|computador esta estranho|pc esquisito)\b", t_limpo):
         return {
             "acao": "perguntar_sintoma_pc",
-            "resposta_direta": "[EMOCAO:curiosidade] O que está acontecendo?",
+            "resposta_direta": "O que está acontecendo?",
             "novo_contexto": {
                 "aguardando_sintoma_pc": True,
                 "ultimo_topico": "hardware_pc",
@@ -735,7 +761,7 @@ def interpretar_intencao_natural(
     ):
         return {
             "acao": "oferecer_diagnostico_pc",
-            "resposta_direta": "[EMOCAO:preocupacao] Quer que eu verifique o consumo de recursos?",
+            "resposta_direta": "Quer que eu verifique o consumo de recursos?",
             "novo_contexto": {
                 "aguardando_sintoma_pc": False,
                 "aguardando_confirmacao_diagnostico": True,
@@ -836,24 +862,6 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "seguranca"},
         }
 
-    # 19. Modos visuais e controles de presença do holograma no desktop
-    if re.search(r"\b(modo foco|focar|centro da tela)\b", t_limpo):
-        return {"acao": "modo_avatar", "parametros": {"modo": "foco"}, "novo_contexto": {}}
-    if re.search(r"\b(modo compacto|ir para o canto|ficar pequena)\b", t_limpo):
-        return {"acao": "modo_avatar", "parametros": {"modo": "compacto"}, "novo_contexto": {}}
-    if re.search(r"\b(modo conversa|aparecer|mostrar holograma|materializar)\b", t_limpo):
-        return {"acao": "modo_avatar", "parametros": {"modo": "conversa"}, "novo_contexto": {}}
-    if re.search(r"\b(ocultar holograma|esconder holograma|ficar invisivel|desmaterializar)\b", t_limpo):
-        return {"acao": "modo_avatar", "parametros": {"modo": "oculto"}, "novo_contexto": {}}
-    if re.search(r"\b(mais transparente|diminuir opacidade)\b", t_limpo):
-        return {"acao": "config_holograma", "parametros": {"opacidade_delta": -0.15}, "novo_contexto": {}}
-    if re.search(r"\b(menos transparente|mais nitida|aumentar opacidade)\b", t_limpo):
-        return {"acao": "config_holograma", "parametros": {"opacidade_delta": 0.15}, "novo_contexto": {}}
-    if re.search(r"\b(aumentar holograma|ficar maior)\b", t_limpo):
-        return {"acao": "config_holograma", "parametros": {"escala_delta": 0.15}, "novo_contexto": {}}
-    if re.search(r"\b(diminuir holograma|ficar menor)\b", t_limpo):
-        return {"acao": "config_holograma", "parametros": {"escala_delta": -0.15}, "novo_contexto": {}}
-
     return None
 
 
@@ -895,7 +903,7 @@ def formatar_resposta_telemetria(dados: dict[str, Any], foco: str = "geral") -> 
         modelo = dados.get("modelo", "AMD Radeon RX 580")
         vram = dados.get("vram", "8 GB")
         uso = dados.get("uso_3d", "operando normalmente")
-        return f"[EMOCAO:concentracao] Sua {modelo} de {vram} está com utilização em {uso}, Henry."
+        return f"Sua {modelo} de {vram} está com utilização em {uso}, Henry."
 
     ram = dados.get("memoria_ram", {})
     cpu = dados.get("cpu_percent", "0%")
@@ -904,24 +912,24 @@ def formatar_resposta_telemetria(dados: dict[str, Any], foco: str = "geral") -> 
 
     if foco == "ram":
         return (
-            f"[EMOCAO:concentracao] Você está utilizando {ram.get('usado_gb', '')} de memória RAM, "
+            f"Você está utilizando {ram.get('usado_gb', '')} de memória RAM, "
             f"com {ram.get('livre_gb', '')} livres."
         )
     if foco == "cpu":
-        return f"[EMOCAO:concentracao] O processador está em {cpu} de uso agora, Henry."
+        return f"O processador está em {cpu} de uso agora, Henry."
     if foco == "disco":
         return (
-            f"[EMOCAO:concentracao] O disco C está em {disco.get('percentual_usado', '')}, "
+            f"O disco C está em {disco.get('percentual_usado', '')}, "
             f"com {disco.get('livre_gb', '')} livres."
         )
     if foco == "diagnostico":
         return (
-            f"[EMOCAO:concentracao] Verifiquei agora: o processador está em {cpu} e a RAM em "
+            f"Verifiquei agora: o processador está em {cpu} e a RAM em "
             f"{ram.get('usado_gb', '')} ({ram.get('percentual', '')}). Não há sobrecarga crítica no sistema."
         )
 
     gpu_str = f" e a {gpu.get('modelo', 'GPU')} está normal" if gpu else ""
     return (
-        f"[EMOCAO:amigavel] Seu computador está funcionando normalmente: CPU em {cpu}, "
+        f"Seu computador está funcionando normalmente: CPU em {cpu}, "
         f"RAM em {ram.get('usado_gb', '')}{gpu_str}. Deseja que eu verifique mais alguma coisa?"
     )

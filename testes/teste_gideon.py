@@ -1,19 +1,11 @@
-"""Bateria de testes de validação da Gideon (Fase 1 + WebSocket + Protocolo)."""
+"""Bateria de testes de validação da Gideon (persona, servidor e streaming)."""
 
 import asyncio
 import json
 import httpx
 from gideon.servidor import app, TOKEN_LOCAL
-from gideon.persona import obter_prompt_sistema, EMOCOES_DISPONIVEIS
-from gideon.protocolo import (
-    TipoMensagem,
-    ModoAvatar,
-    Emocao,
-    criar_evento,
-    analisar_evento,
-    extrair_emocoes_texto,
-    limpar_emocoes_texto,
-)
+from gideon.persona import obter_prompt_sistema
+from gideon.voz.fala import limpar_texto_para_fala
 
 
 def test_persona():
@@ -21,32 +13,17 @@ def test_persona():
     prompt = obter_prompt_sistema()
     assert "Gideon" in prompt, "Nome Gideon deve estar presente no prompt"
     assert "Henry" in prompt, "Nome Henry deve estar presente no prompt"
-    assert "[EMOCAO:" in prompt, "Instruções de emoção devem estar presentes"
-    assert len(EMOCOES_DISPONIVEIS) == 9, "Devem existir 9 emoções catalogadas"
+    assert "[EMOCAO:" not in prompt, "Persona não deve instruir tags internas"
     print("  -> Persona: OK")
 
 
-def test_protocolo():
-    print("[2/5] Testando Protocolo WebSocket...")
-    # Testa criação de evento
-    evento_json = criar_evento("emocao", nome="curiosidade", intensidade=0.8)
-    dados = analisar_evento(evento_json)
-    assert dados["tipo"] == "emocao"
-    assert dados["dados"]["nome"] == "curiosidade"
-    assert dados["dados"]["intensidade"] == 0.8
-
-    # Testa extração de emoções de texto
+def test_limpeza_tags_legadas():
+    print("[2/5] Testando limpeza defensiva de tags legadas...")
     texto = "[EMOCAO:amigavel] Olá Henry! [EMOCAO:humor] Que bom te ver."
-    emocoes = extrair_emocoes_texto(texto)
-    assert len(emocoes) == 2
-    assert emocoes[0][1] == "amigavel"
-    assert emocoes[1][1] == "humor"
-
-    # Testa limpeza de emoções
-    texto_limpo = limpar_emocoes_texto(texto)
+    texto_limpo = limpar_texto_para_fala(texto)
     assert "[EMOCAO:" not in texto_limpo
     assert "Olá Henry! Que bom te ver." in texto_limpo
-    print("  -> Protocolo: OK")
+    print("  -> Limpeza defensiva: OK")
 
 
 async def test_servidor_status():
@@ -144,7 +121,7 @@ async def test_portao_fase1():
 
 async def principal():
     test_persona()
-    test_protocolo()
+    test_limpeza_tags_legadas()
     await test_servidor_status()
     await test_chat_streaming()
     await test_portao_fase1()

@@ -1,9 +1,10 @@
-"""Sistema de memória permanente da Gideon (Fatos, Conversas com FTS5 e Resumos).
+﻿"""Sistema de memória permanente da Gideon (Fatos, Conversas com FTS5, Resumos e Auto-correção).
 
 Segue estritamente a especificação da Seção 7:
 - Fatos: chave -> valor curtos e editáveis com data de atualização.
 - Conversa: histórico pesquisável por FTS5 (sem acentos).
 - Lembranças: recuperação dos top 5 trechos relevantes citando a data de origem.
+- Lições Aprendidas: histórico de erros e correções aprendidas para auto-cura.
 - Comandos explícitos: 'lembra que...', 'o que você sabe sobre mim?', 'esquece...'.
 """
 
@@ -12,8 +13,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DADOS_DIR = ROOT_DIR / "dados"
+from gideon.caminhos import DADOS_DIR
+
 DB_PATH = DADOS_DIR / "memoria.db"
 
 
@@ -87,9 +88,23 @@ class Memoria:
                 criado_em TEXT DEFAULT (datetime('now', 'localtime'))
             );
             """)
+
+            # Tabela de lições aprendidas (Auto-correção e auto-cura)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS licoes_aprendidas (
+                id INTEGER PRIMARY KEY,
+                contexto TEXT NOT NULL,
+                erro_detectado TEXT NOT NULL,
+                solucao_ou_regra TEXT NOT NULL,
+                sucesso INTEGER DEFAULT 1,
+                criado_em TEXT DEFAULT (datetime('now', 'localtime')),
+                atualizado_em TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+            """)
+
             con.commit()
 
-    # ─── Fatos ──────────────────────────────────────────────────
+    # ─── Fatos ────────────────────────────────────────────────────────
 
     def salvar_fato(self, chave: str, valor: str, origem: str = "conversa") -> None:
         """Adiciona ou atualiza um fato permanente."""
@@ -127,7 +142,7 @@ class Memoria:
             con.commit()
             return cur.rowcount > 0
 
-    # ─── Conversa e Busca FTS5 ──────────────────────────────────
+    # ─── Conversa e Busca FTS5 ────────────────────────────────────────
 
     def gravar_mensagem(self, quem: str, texto: str) -> None:
         """Registra uma fala no histórico permanente da memória."""
@@ -142,7 +157,6 @@ class Memoria:
         if not termo_limpo:
             return []
 
-        # Constrói query de prefixo FTS5 para matching de palavras
         tokens = [f'"{token}"' for token in termo_limpo.split() if len(token) > 2]
         if not tokens:
             tokens = [f'"{t}"' for t in termo_limpo.split()]
@@ -172,7 +186,49 @@ class Memoria:
             except sqlite3.OperationalError:
                 return []
 
-    # ─── Comandos Rápidos e Recuperação de Lembranças ───────────
+    # ─── Lições e Auto-Correções Aprendidas (Self-Healing) ────────────
+
+    def salvar_licao(self, contexto: str, erro_detectado: str, solucao_ou_regra: str, sucesso: bool = True) -> None:
+        """Salva uma regra de aprendizado/auto-correção derivada de falha ou correção humana."""
+        with self._conectar() as con:
+            con.execute("""
+                INSERT INTO licoes_aprendidas (contexto, erro_detectado, solucao_ou_regra, sucesso, atualizado_em)
+                VALUES (?, ?, ?, ?, datetime('now', 'localtime'));
+            """, (contexto.strip(), erro_detectado.strip(), solucao_ou_regra.strip(), 1 if sucesso else 0))
+            con.commit()
+
+    def listar_licoes(self, limite: int = 10) -> list[dict[str, Any]]:
+        """Retorna as lições aprendidas mais recentes."""
+        with self._conectar() as con:
+            rows = con.execute("""
+                SELECT id, contexto, erro_detectado, solucao_ou_regra, sucesso, atualizado_em
+                FROM licoes_aprendidas
+                ORDER BY id DESC
+                LIMIT ?;
+            """, (limite,)).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "contexto": r["contexto"],
+                    "erro": r["erro_detectado"],
+                    "solucao": r["solucao_ou_regra"],
+                    "sucesso": bool(r["sucesso"]),
+                    "atualizado_em": r["atualizado_em"],
+                }
+                for r in rows
+            ]
+
+    def formatar_licoes_para_prompt(self, limite: int = 5) -> str:
+        """Formata as lições aprendidas para injeção no prompt de sistema."""
+        licoes = self.listar_licoes(limite=limite)
+        if not licoes:
+            return ""
+        linhas = []
+        for l in licoes:
+            linhas.append(f"- Contexto: {l['contexto']} | Regra aprendida: {l['solucao']}")
+        return "\n".join(linhas)
+
+    # ─── Comandos Rápidos e Recuperação de Lembranças ─────────────────
 
     def processar_comando_explicito(self, texto: str) -> str | None:
         """Detecta se a mensagem é um comando direto de memória e responde imediatamente."""
@@ -186,16 +242,15 @@ class Memoria:
         )
         if match_lembra:
             conteudo = match_lembra.group(1).strip()
-            # Tenta dividir em chave e valor preservando maiúsculas
             partes = re.split(r"\s+(?:é|=|sao|são|gosta de|prefere)\s+", conteudo, maxsplit=1, flags=re.IGNORECASE)
             if len(partes) == 2:
                 chave = partes[0].strip()
                 valor = partes[1].strip()
                 self.salvar_fato(chave, valor)
-                return f"[EMOCAO:satisfacao] Anotado, Henry. Guardei em minha memória permanente que {chave} é {valor}."
+                return f"Anotado, Henry. Guardei em minha memória permanente que {chave} é {valor}."
 
             self.salvar_fato(conteudo, "verdadeiro")
-            return f"[EMOCAO:satisfacao] Entendido, Henry. Registrei essa informação em minha memória permanente: '{conteudo}'."
+            return f"Entendido, Henry. Registrei essa informação em minha memória permanente: '{conteudo}'."
 
         texto_lower = texto_limpo.lower()
 
@@ -203,9 +258,9 @@ class Memoria:
         if any(p in texto_lower for p in ["o que você sabe sobre mim", "o que voce sabe sobre mim", "quais fatos você sabe", "minhas lembranças"]):
             fatos = self.listar_fatos()
             if not fatos:
-                return "[EMOCAO:neutra] No momento não possuo nenhuma informação permanente registrada sobre você em meu banco de dados."
+                return "No momento não possuo nenhuma informação permanente registrada sobre você em meu banco de dados."
             linhas = [f"• **{f['chave']}**: {f['valor']} (registrado em {f['atualizado_em'][:10]})" for f in fatos]
-            return "[EMOCAO:amigavel] Aqui está o que tenho registrado em minha memória permanente sobre você, Henry:\n" + "\n".join(linhas)
+            return "Aqui está o que tenho registrado em minha memória permanente sobre você, Henry:\n" + "\n".join(linhas)
 
         # "esquece / esquecer fato X"
         match_esquece = re.search(r"^(?:gideon[, ]+)?esquec(?:a|e)\s+(?:o fato |a informacao |sobre )?(.+)$", texto_lower)
@@ -213,9 +268,9 @@ class Memoria:
             alvo = match_esquece.group(1).strip()
             removido = self.esquecer_fato(alvo)
             if removido:
-                return f"[EMOCAO:satisfacao] A informação '{alvo}' foi excluída de minha memória permanente com sucesso."
+                return f"A informação '{alvo}' foi excluída de minha memória permanente com sucesso."
             else:
-                return f"[EMOCAO:neutra] Não encontrei nenhum fato registrado sob a chave '{alvo}'."
+                return f"Não encontrei nenhum fato registrado sob a chave '{alvo}'."
 
         return None
 

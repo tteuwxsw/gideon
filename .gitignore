@@ -10,17 +10,20 @@ dados/
 __pycache__/
 *.pyc
 
-# IDE
+# IDE e ferramentas
 .vscode/
 .idea/
+.kiro/
+*.orig
 
-# Unreal Engine 5 temporarios e compilados
-gideon_ue5/Intermediate/
-gideon_ue5/Saved/
-gideon_ue5/DerivedDataCache/
-gideon_ue5/Build/
-gideon_ue5/Binaries/
-gideon_ue5_desktop_shot.png
+# Build e instaladores (apenas na raiz)
+/build/
+/dist/
+/release/
+*.exe
+
+# Frontend dependências locais
+node_modules/
 
 # Sistema
 .DS_Store

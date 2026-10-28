@@ -10,7 +10,9 @@ from typing import Any
 
 import psutil
 
+from gideon.caminhos import FROZEN, ROOT_DIR
 from gideon.gate import Ferramenta, Risco
+from gideon.processos_windows import comando_powershell, opcoes_processo_oculto
 
 PASTAS_COMUNS: dict[str, Path] = {
     "downloads": Path.home() / "Downloads",
@@ -27,11 +29,45 @@ PASTAS_COMUNS: dict[str, Path] = {
     "músicas": Path.home() / "Music",
     "videos": Path.home() / "Videos",
     "vídeos": Path.home() / "Videos",
-    "projeto": Path(__file__).resolve().parent.parent.parent,
-    "usuario": Path.home(),
+    "projeto": (Path.home() / "Documents" / "Gideon") if FROZEN else ROOT_DIR,
 }
 
-ARQUIVOS_PROTEGIDOS = [".env", "id_rsa", "id_ed25519", "auth_token.txt", "chave", "password", "token"]
+RAIZES_PERMITIDAS = tuple(
+    raiz.resolve()
+    for raiz in {
+        PASTAS_COMUNS["downloads"],
+        PASTAS_COMUNS["documentos"],
+        PASTAS_COMUNS["desktop"],
+        PASTAS_COMUNS["imagens"],
+        PASTAS_COMUNS["musicas"],
+        PASTAS_COMUNS["videos"],
+        PASTAS_COMUNS["projeto"],
+    }
+)
+ARQUIVOS_PROTEGIDOS = (".env", "id_rsa", "id_ed25519", "auth_token", "chave", "password", "secret", "token")
+DIRETORIOS_PROTEGIDOS = {".aws", ".azure", ".git", ".gnupg", ".kube", ".ssh"}
+
+
+def _esta_contido(caminho: Path, raiz: Path) -> bool:
+    return caminho == raiz or raiz in caminho.parents
+
+
+def _resolver_caminho_permitido(caminho: str | Path, *, base: Path) -> Path:
+    """Resolve um caminho apenas dentro das areas explicitamente autorizadas."""
+    candidato = Path(os.path.expandvars(str(caminho).strip(" \"'")))
+    if not candidato.is_absolute():
+        candidato = base / candidato
+    resolvido = candidato.resolve(strict=False)
+
+    if not any(_esta_contido(resolvido, raiz) for raiz in RAIZES_PERMITIDAS):
+        raise PermissionError("O caminho solicitado esta fora das pastas autorizadas da Gideon.")
+
+    for parte in resolvido.parts:
+        nome = parte.lower()
+        if nome in DIRETORIOS_PROTEGIDOS or any(protegido in nome for protegido in ARQUIVOS_PROTEGIDOS):
+            raise PermissionError("O caminho solicitado contem credenciais ou segredos protegidos.")
+
+    return resolvido
 
 
 def _resolver_pasta(pasta: str) -> Path:
@@ -40,19 +76,16 @@ def _resolver_pasta(pasta: str) -> Path:
         if chave.startswith(prefixo):
             chave = chave[len(prefixo):].strip()
     if chave in PASTAS_COMUNS:
-        return PASTAS_COMUNS[chave]
-    candidato = Path(os.path.expandvars(pasta.strip(" \"'")))
-    if not candidato.is_absolute():
-        # Tenta localizar dentro da home do usuário
-        na_home = Path.home() / candidato
-        if na_home.exists():
-            return na_home
-    return candidato
+        return _resolver_caminho_permitido(PASTAS_COMUNS[chave], base=Path.home())
+    return _resolver_caminho_permitido(pasta, base=Path.home())
 
 
 def listar_arquivos(pasta: str = "downloads", limite: int = 20) -> dict[str, Any]:
     """Lista os arquivos recentes dentro de uma pasta permitida do usuário."""
-    caminho = _resolver_pasta(pasta)
+    try:
+        caminho = _resolver_pasta(pasta)
+    except PermissionError as e:
+        return {"sucesso": False, "verificado": False, "erro": str(e), "mensagem_humana": str(e)}
 
     if not caminho.exists() or not caminho.is_dir():
         return {
@@ -94,7 +127,10 @@ def listar_arquivos(pasta: str = "downloads", limite: int = 20) -> dict[str, Any
 
 def abrir_pasta(pasta: str = "downloads") -> dict[str, Any]:
     """Abre uma pasta no Explorador de Arquivos do Windows e VERIFICA se foi aberta."""
-    caminho = _resolver_pasta(pasta)
+    try:
+        caminho = _resolver_pasta(pasta)
+    except PermissionError as e:
+        return {"sucesso": False, "verificado": False, "erro": str(e), "mensagem_humana": str(e)}
     if not caminho.exists() or not caminho.is_dir():
         return {
             "sucesso": False,
@@ -160,7 +196,10 @@ def pesquisar_arquivos(termo: str, pasta: str = "todas", limite: int = 15) -> di
             PASTAS_COMUNS["projeto"],
         ]
     else:
-        alvo = _resolver_pasta(pasta)
+        try:
+            alvo = _resolver_pasta(pasta)
+        except PermissionError as e:
+            return {"sucesso": False, "verificado": False, "erro": str(e), "mensagem_humana": str(e)}
         if not alvo.exists() or not alvo.is_dir():
             return {
                 "sucesso": False,
@@ -180,6 +219,8 @@ def pesquisar_arquivos(termo: str, pasta: str = "todas", limite: int = 15) -> di
             for item in base.iterdir():
                 if len(encontrados) >= limite:
                     break
+                if item.is_symlink():
+                    continue
                 caminho_str = str(item.resolve())
                 if caminho_str in vistos:
                     continue
@@ -191,12 +232,14 @@ def pesquisar_arquivos(termo: str, pasta: str = "todas", limite: int = 15) -> di
                         "tipo": "diretorio" if item.is_dir() else "arquivo",
                         "tamanho_bytes": item.stat().st_size if item.is_file() else 0,
                     })
-                # Busca até 1 nível de subpasta sem travar em node_modules/.git/.venv
-                if item.is_dir() and item.name not in {".git", ".venv", "node_modules", "__pycache__", ".godot"}:
+                # Busca até 1 nível de subpasta sem percorrer diretórios grandes ou internos.
+                if item.is_dir() and item.name not in {".git", ".venv", "node_modules", "__pycache__"}:
                     try:
                         for sub in item.iterdir():
                             if len(encontrados) >= limite:
                                 break
+                            if sub.is_symlink():
+                                continue
                             sub_str = str(sub.resolve())
                             if sub_str not in vistos and termo_limpo in sub.name.lower():
                                 vistos.add(sub_str)
@@ -240,15 +283,13 @@ def pesquisar_arquivos(termo: str, pasta: str = "todas", limite: int = 15) -> di
 
 def ler_arquivo(caminho: str, max_linhas: int = 150) -> dict[str, Any]:
     """Lê o conteúdo textual de um arquivo com proteção a arquivos secretos."""
-    p = Path(caminho).resolve()
-
-    # Proteção de segurança obrigatória (Regra 2 da especificação)
-    nome_lower = p.name.lower()
-    if any(prot in nome_lower for prot in ARQUIVOS_PROTEGIDOS):
+    try:
+        p = _resolver_caminho_permitido(caminho, base=PASTAS_COMUNS["projeto"])
+    except PermissionError as e:
         return {
             "sucesso": False,
             "verificado": False,
-            "erro": "Acesso negado: este arquivo contém credenciais ou segredos protegidos.",
+            "erro": f"Acesso negado: {e}",
             "mensagem_humana": "Por segurança, não posso ler arquivos que contenham credenciais ou chaves secretas, Henry.",
         }
 
@@ -294,25 +335,29 @@ def criar_arquivo(caminho: str, conteudo: str = "", pasta: str = "documentos") -
             "mensagem_humana": "Qual nome você gostaria de dar ao arquivo, Henry?",
         }
 
-    p = Path(caminho_limpo)
-    if not p.is_absolute():
+    try:
         dir_base = _resolver_pasta(pasta)
-        p = (dir_base / p).resolve()
-    else:
-        p = p.resolve()
-
-    nome_lower = p.name.lower()
-    if any(prot in nome_lower for prot in ARQUIVOS_PROTEGIDOS):
+        p = _resolver_caminho_permitido(caminho_limpo, base=dir_base)
+    except PermissionError as e:
         return {
             "sucesso": False,
             "verificado": False,
-            "erro": "Operação bloqueada: não é permitido sobrescrever arquivos de credenciais.",
+            "erro": f"Operação bloqueada: {e}",
             "mensagem_humana": "Não posso criar ou sobrescrever arquivos sensíveis de configuração, Henry.",
+        }
+
+    if p.exists():
+        return {
+            "sucesso": False,
+            "verificado": False,
+            "erro": "Operação bloqueada: o arquivo já existe e não será sobrescrito sem uma ferramenta específica.",
+            "mensagem_humana": f"O arquivo {p.name} já existe. Não vou sobrescrevê-lo sem uma confirmação específica, Henry.",
         }
 
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(conteudo, encoding="utf-8")
+        with p.open("x", encoding="utf-8") as arquivo:
+            arquivo.write(conteudo)
 
         # Verificação pós-condição real no disco
         existe = p.exists() and p.is_file()
@@ -350,13 +395,23 @@ def criar_arquivo(caminho: str, conteudo: str = "", pasta: str = "documentos") -
 
 def mover_para_lixeira(caminho: str) -> dict[str, Any]:
     """Move um arquivo para a Lixeira do Windows (ação reversível) e VERIFICA se saiu do local original."""
-    p = Path(caminho).resolve()
+    try:
+        p = _resolver_caminho_permitido(caminho, base=PASTAS_COMUNS["documentos"])
+    except PermissionError as e:
+        return {"sucesso": False, "verificado": False, "erro": str(e), "mensagem_humana": str(e)}
     if not p.exists():
         return {
             "sucesso": False,
             "verificado": False,
             "erro": f"Arquivo '{caminho}' não encontrado para mover para a lixeira.",
             "mensagem_humana": f"Não encontrei o arquivo '{p.name}' para enviar à Lixeira, Henry.",
+        }
+    if not p.is_file():
+        return {
+            "sucesso": False,
+            "verificado": False,
+            "erro": "A ferramenta de lixeira aceita somente arquivos regulares.",
+            "mensagem_humana": "Por segurança, só posso mover arquivos regulares para a Lixeira por este comando, Henry.",
         }
 
     caminho_escapado = str(p).replace("'", "''")
@@ -366,10 +421,11 @@ def mover_para_lixeira(caminho: str) -> dict[str, Any]:
     )
     try:
         res = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            [comando_powershell(), "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
             capture_output=True,
             text=True,
             timeout=6.0,
+            **opcoes_processo_oculto(),
         )
         foi_removido = not p.exists()
         if res.returncode == 0 and foi_removido:
@@ -407,6 +463,13 @@ FERRAMENTAS_ARQUIVOS = [
         risco=Risco.VERDE,
         executar=listar_arquivos,
         frase=lambda pasta="downloads", **kwargs: f"listar os arquivos da pasta '{pasta}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "pasta": {"type": "string", "description": "Nome da pasta ('downloads', 'documentos', 'desktop')", "default": "downloads"},
+                "limite": {"type": "integer", "description": "Número máximo de arquivos a listar", "default": 20},
+            },
+        },
     ),
     Ferramenta(
         nome="abrir_pasta",
@@ -414,6 +477,12 @@ FERRAMENTAS_ARQUIVOS = [
         risco=Risco.AMARELO,
         executar=abrir_pasta,
         frase=lambda pasta="downloads", **kwargs: f"abrir a pasta '{pasta}' no Explorador de Arquivos",
+        parametros={
+            "type": "object",
+            "properties": {
+                "pasta": {"type": "string", "description": "Nome da pasta a abrir no Explorador", "default": "downloads"},
+            },
+        },
     ),
     Ferramenta(
         nome="pesquisar_arquivos",
@@ -421,6 +490,15 @@ FERRAMENTAS_ARQUIVOS = [
         risco=Risco.VERDE,
         executar=pesquisar_arquivos,
         frase=lambda termo, pasta="todas", **kwargs: f"pesquisar arquivos contendo '{termo}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "termo": {"type": "string", "description": "Termo ou extensão a pesquisar"},
+                "pasta": {"type": "string", "description": "Pasta ('downloads', 'documentos', 'desktop', 'todas')", "default": "todas"},
+                "limite": {"type": "integer", "description": "Limite de resultados", "default": 15},
+            },
+            "required": ["termo"],
+        },
     ),
     Ferramenta(
         nome="ler_arquivo",
@@ -428,6 +506,14 @@ FERRAMENTAS_ARQUIVOS = [
         risco=Risco.VERDE,
         executar=ler_arquivo,
         frase=lambda caminho, **kwargs: f"ler o conteúdo do arquivo '{caminho}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "caminho": {"type": "string", "description": "Caminho ou nome do arquivo a ler"},
+                "max_linhas": {"type": "integer", "description": "Número máximo de linhas a ler", "default": 150},
+            },
+            "required": ["caminho"],
+        },
     ),
     Ferramenta(
         nome="criar_arquivo",
@@ -435,6 +521,15 @@ FERRAMENTAS_ARQUIVOS = [
         risco=Risco.AMARELO,
         executar=criar_arquivo,
         frase=lambda caminho, **kwargs: f"criar o arquivo '{caminho}'",
+        parametros={
+            "type": "object",
+            "properties": {
+                "caminho": {"type": "string", "description": "Nome do arquivo a ser criado"},
+                "conteudo": {"type": "string", "description": "Conteúdo de texto a gravar", "default": ""},
+                "pasta": {"type": "string", "description": "Pasta de destino ('documentos', 'downloads', 'desktop', 'projeto')", "default": "documentos"},
+            },
+            "required": ["caminho"],
+        },
     ),
     Ferramenta(
         nome="mover_para_lixeira",
@@ -442,5 +537,12 @@ FERRAMENTAS_ARQUIVOS = [
         risco=Risco.AMARELO,
         executar=mover_para_lixeira,
         frase=lambda caminho, **kwargs: f"mover o arquivo '{caminho}' para a Lixeira do Windows",
+        parametros={
+            "type": "object",
+            "properties": {
+                "caminho": {"type": "string", "description": "Caminho do arquivo a mover para a lixeira"},
+            },
+            "required": ["caminho"],
+        },
     ),
 ]

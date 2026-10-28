@@ -1,0 +1,80 @@
+════════════════════════════════════════════════════════════
+  GIDEON - FORMAS DE INSTALAÇÃO SIMPLIFICADAS
+════════════════════════════════════════════════════════════
+
+✅ LIMPEZA COMPLETA FEITA!
+
+Arquivos removidos:
+  ❌ iniciar_gideon.bat
+  ❌ parar_gideon.bat
+  ❌ iniciar_gideon_silencioso.vbs
+  ❌ iniciar_gideon_invisivel.vbs
+  ❌ rodar_invisivel.bat
+  ❌ build_gideon.cmd
+  ❌ compilar_gideon.bat
+  ❌ compilar_gideon.ps1
+  ❌ build_exe.py
+  ❌ COMECE_AQUI.txt
+  ❌ SETUP_INVISIVEL.md
+  ❌ LEIA_PRIMEIRO.txt
+
+════════════════════════════════════════════════════════════
+
+📋 AGORA SÓ EXISTEM 2 FORMAS:
+
+┌─────────────────────────────────────────────────────────┐
+│  1. LINHA DE COMANDO (Híbrido)                          │
+└─────────────────────────────────────────────────────────┘
+
+   Como usar:
+   
+   python -m gideon.wake
+   
+   Ou instalar globalmente:
+   
+   pip install -e .
+   gideon
+   
+   Vantagens:
+   • Leve (~50 MB)
+   • Fácil de atualizar
+   • Acesso completo ao código
+
+
+┌─────────────────────────────────────────────────────────┐
+│  2. EXECUTÁVEL (.EXE)                                   │
+└─────────────────────────────────────────────────────────┘
+
+   Arquivo:
+   
+   dist\GideonWake.exe
+   
+   Como usar:
+   
+   Clique duplo → Pronto!
+   
+   Vantagens:
+   • Não precisa Python
+   • Portátil
+   • Roda em qualquer PC Windows
+
+════════════════════════════════════════════════════════════
+
+📖 DOCUMENTAÇÃO:
+
+  README.md     → Guia principal
+  INSTALAR.md   → Instruções detalhadas
+
+════════════════════════════════════════════════════════════
+
+⚙️ EXTRAS DISPONÍVEIS:
+
+  registrar_autostart.ps1  → Iniciar com Windows
+  instalar_ffmpeg.bat      → Voz da Gideon
+  patch_turbo.py           → Velocidade máxima
+
+════════════════════════════════════════════════════════════
+
+✨ TUDO LIMPO E ORGANIZADO!
+
+Escolha uma forma e use. Simples.

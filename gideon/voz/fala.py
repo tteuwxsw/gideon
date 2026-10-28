@@ -1,7 +1,7 @@
 """Módulo de síntese vocal (TTS) de baixa latência e identidade vocal única da Gideon.
 
 Características principais:
-1. Identidade Vocal Única e Imutável (`IDENTIFICADOR_VOZ_FIXA = "pt-BR-FranciscaNeural"`):
+1. Identidade Vocal Única e Imutável (PocketTTS local ou Thalita como recuperação):
    - Elimina alternância entre vozes ou mudanças de timbre multilíngues.
    - Prosódia natural brasileira com tratamento fonético de siglas, números e nomes.
 2. Baixa Latência com Loop Assíncrono Persistente e Cache em RAM/Disco (`dados/cache_voz/`):
@@ -27,12 +27,17 @@ from typing import Callable, Any, Iterable
 
 import numpy as np
 
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-CACHE_VOZ_DIR = ROOT_DIR / "dados" / "cache_voz"
+from gideon.caminhos import DADOS_DIR
+from gideon.processos_windows import comando_powershell, opcoes_processo_oculto
+from gideon.configuracao import obter_idioma, obter_voz_para_idioma
+from gideon.voz.pockettts_local import criar_motor_local
+
+CACHE_VOZ_DIR = DADOS_DIR / "cache_voz"
 
 # IDENTIDADE VOCAL ÚNICA E FIXA DA GIDEON (Nunca alterna entre locutoras)
-IDENTIFICADOR_VOZ_FIXA = "pt-BR-FranciscaNeural"
-VELOCIDADE_VOZ_FIXA = "+4%"
+# Thalita oferece a diccao pt-BR mais natural sem filtros que artificializem o timbre.
+IDENTIFICADOR_VOZ_FIXA = "pt-BR-ThalitaMultilingualNeural"
+VELOCIDADE_VOZ_FIXA = "+0%"
 TOM_VOZ_FIXO = "+0Hz"
 
 # Frases curtas de uso frequente pré-aquecidas em cache para resposta instantânea (< 5ms)
@@ -40,8 +45,9 @@ FRASES_PRE_AQUECIMENTO = (
     "Abrindo.",
     "Executando.",
     "Tudo bem.",
-    "Estou aqui, Henry.",
-    "Pois não, Henry.",
+    "Estou aqui, Senhor Henry.",
+    "Pois não, Senhor Henry.",
+    "Às suas ordens, Senhor Henry.",
     "Feito.",
     "Cancelado.",
     "Claro. O que gostaria de ouvir?",
@@ -77,15 +83,11 @@ def formatar_prosodia_gideon(texto: str) -> str:
     substituicoes = [
         (r"\bGideon\b", "Guídeon"),
         (r"\bgideon\b", "Guídeon"),
-        (r"\bTIME VAULT\b", "Time Vault"),
-        (r"\bSTAR Labs\b", "Star Labs"),
         (r"(\d+)\s*GB\b", r"\1 gigabytes"),
         (r"(\d+)\s*MB\b", r"\1 megabytes"),
         (r"(\d+(?:[.,]\d+)?)\s*%", r"\1 por cento"),
         (r"\bVRAM\b", "memória de vídeo"),
         (r"\bRX\s*580X?\b", "R X 580"),
-        (r"\b2048SP\b", ""),
-        (r"\bGDDR5\b", ""),
         (r"\bVS\s*Code\b", "V S Code"),
     ]
     for padrao, destino in substituicoes:
@@ -115,7 +117,18 @@ class SintetizadorVoz:
         pre_aquecer: bool = True,
     ):
         self.callback_evento = callback_evento
-        self.voz_id = IDENTIFICADOR_VOZ_FIXA
+        self.idioma = obter_idioma()
+        self._pockettts = criar_motor_local()
+        self.voz_id = (
+            "gideon-local-pockettts"
+            if (self._pockettts and self.idioma == "pt-BR")
+            else obter_voz_para_idioma(self.idioma)
+        )
+        self._identidade_cache = (
+            self._pockettts.identidade_cache
+            if (self._pockettts and self.idioma == "pt-BR")
+            else self.voz_id
+        )
         self.barge_in_ativo = barge_in_ativo
         self.limiar_barge_in = limiar_barge_in
         self.fator_rejeicao_eco = 2.0
@@ -143,7 +156,7 @@ class SintetizadorVoz:
         self._thread_async.start()
 
         self._inicializar_motor_unico()
-        if pre_aquecer and self._edge_disponivel:
+        if pre_aquecer and self._edge_disponivel and self._pockettts is None:
             threading.Thread(target=self._pre_aquecer_frases_comuns, daemon=True).start()
 
     def _rodar_loop_persistente(self) -> None:
@@ -156,18 +169,23 @@ class SintetizadorVoz:
             import edge_tts  # noqa: F401
             import av  # noqa: F401
             self._edge_disponivel = True
-            self._motor_ativo = "neural_hd_fixo"
-            print(f"  [Voz] Identidade vocal fixa carregada: {self.voz_id} (Timbre Único Consistente).")
         except Exception as e:
+            print(f"  [Voz] Aviso: Edge TTS indisponivel ({e}).")
+
+        if self._pockettts is not None:
+            self._motor_ativo = "pockettts_local"
+        elif self._edge_disponivel:
+            self._motor_ativo = "neural_hd_fixo"
+        else:
             self._motor_ativo = "windows_fallback"
-            print(f"  [Voz] Aviso: Motor Neural indisponível ({e}). Usando fallback offline.")
+        print(f"  [Voz] Identidade vocal fixa carregada: {self.voz_id} (Timbre Unico Consistente).")
 
     @property
     def falando(self) -> bool:
         return self._falando
 
     def _chave_cache(self, texto_prosodia: str) -> str:
-        identidade = f"{self.voz_id}|{VELOCIDADE_VOZ_FIXA}|{TOM_VOZ_FIXO}|{texto_prosodia.strip().lower()}"
+        identidade = f"{self._identidade_cache}|{VELOCIDADE_VOZ_FIXA}|{TOM_VOZ_FIXO}|{texto_prosodia.strip().lower()}"
         return hashlib.sha256(identidade.encode("utf-8")).hexdigest()[:24]
 
     def _obter_do_cache(self, chave: str) -> tuple[np.ndarray, int] | None:
@@ -245,10 +263,21 @@ class SintetizadorVoz:
             return em_cache[0], em_cache[1], True
 
         amostras, taxa = self._gerar_audio_voz_fixa(texto_prosodia)
-        self._salvar_no_cache(chave, amostras, taxa)
+        
+        # NOVO: Aplica efeitos da Gideon (The Flash) no áudio sintetizado
+        try:
+            from gideon.voz.efeito_gideon import aplicar_efeito_gideon_numpy
+            amostras = aplicar_efeito_gideon_numpy(amostras, taxa)
+        except Exception:
+            pass  # Se falhar, usa áudio sem efeitos
+        
+        # O motor local pode ter sido desativado durante a sintese; nesse caso,
+        # guarda o audio de recuperacao apenas sob a identidade da Thalita.
+        chave_final = self._chave_cache(texto_prosodia)
+        self._salvar_no_cache(chave_final, amostras, taxa)
         return amostras, taxa, False
 
-    def falar(self, texto: str, voz_kokoro: str = "pf_dora") -> bool:
+    def falar(self, texto: str) -> bool:
         """Sintetiza e reproduz o texto com identidade vocal única, baixa latência e Barge-In."""
         texto_limpo = limpar_texto_para_fala(texto)
         if not texto_limpo:
@@ -264,24 +293,24 @@ class SintetizadorVoz:
             self._notificar({"tipo": "fala_inicio", "texto": texto_limpo, "voz_id": self.voz_id})
 
             try:
-                if self._edge_disponivel:
+                if self._pockettts is not None or self._edge_disponivel:
                     sentencas = dividir_em_sentencas_fala(texto_limpo)
                     if len(sentencas) <= 1:
                         amostras, taxa, do_cache = self.sintetizar_para_memoria(texto_limpo)
                         self.ultima_latencia_ttfa_ms = (time.perf_counter() - t_inicio_tts) * 1000.0
                         self.ultimo_foi_cache = do_cache
                         if len(amostras) > 0:
-                            self._reproduzir_com_lipsync_real(amostras, taxa, texto_falado=texto_limpo)
+                            self._reproduzir_audio(amostras, taxa)
                         return not self.foi_interrompida
                     else:
                         # Para múltiplas sentenças, sintetiza a 1ª imediatamente e faz pré-busca das seguintes
                         return self._falar_lista_sentencas_incremental(sentencas, t_inicio_tts)
 
-                self._falar_windows_com_lipsync(texto_limpo)
+                self._falar_windows_fallback(texto_limpo)
                 return not self.foi_interrompida
             except Exception as e:
                 print(f"  [Voz] Erro na síntese neural ({self.voz_id}): {e}. Acionando recuperação offline.")
-                self._falar_windows_com_lipsync(texto_limpo)
+                self._falar_windows_fallback(texto_limpo)
                 return not self.foi_interrompida
             finally:
                 self._falando = False
@@ -314,7 +343,7 @@ class SintetizadorVoz:
                         self.ultimo_foi_cache = do_cache
                         primeiro_audio_emitido = True
                     if len(amostras) > 0 and not self._evento_interromper.is_set():
-                        self._reproduzir_com_lipsync_real(amostras, taxa, texto_falado=s_limpa)
+                        self._reproduzir_audio(amostras, taxa)
                 return not self.foi_interrompida
             finally:
                 self._falando = False
@@ -327,25 +356,52 @@ class SintetizadorVoz:
         import concurrent.futures
 
         fila_audios: deque[tuple[str, concurrent.futures.Future]] = deque()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        trabalhadores = 1 if self._pockettts else 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=trabalhadores) as pool:
             for s in sentencas:
                 fila_audios.append((s, pool.submit(self.sintetizar_para_memoria, s)))
 
             primeira = True
             while fila_audios and not self._evento_interromper.is_set():
                 s_txt, fut = fila_audios.popleft()
-                amostras, taxa, do_cache = fut.result(timeout=12.0)
+                timeout_s = self._pockettts.config.timeout_s + 5.0 if self._pockettts else 12.0
+                amostras, taxa, do_cache = fut.result(timeout=timeout_s)
                 if primeira:
                     self.ultima_latencia_ttfa_ms = (time.perf_counter() - t_inicio_tts) * 1000.0
                     self.ultimo_foi_cache = do_cache
                     primeira = False
                 if len(amostras) > 0 and not self._evento_interromper.is_set():
-                    self._reproduzir_com_lipsync_real(amostras, taxa, texto_falado=s_txt)
+                    self._reproduzir_audio(amostras, taxa)
 
         return not self.foi_interrompida
 
+    def atualizar_idioma(self, novo_idioma: str) -> None:
+        """Atualiza dinamicamente o idioma e a voz neural ativa do sintetizador."""
+        self.idioma = novo_idioma
+        if self.idioma == "pt-BR" and self._pockettts is not None:
+            self.voz_id = "gideon-local-pockettts"
+            self._identidade_cache = self._pockettts.identidade_cache
+        else:
+            self.voz_id = obter_voz_para_idioma(novo_idioma)
+            self._identidade_cache = self.voz_id
+        print(f"  [Voz] Idioma atualizado para {novo_idioma} (Voz: {self.voz_id}).")
+
     def _gerar_audio_voz_fixa(self, texto_prosodia: str) -> tuple[np.ndarray, int]:
-        """Gera e decodifica o áudio neural usando exclusivamente IDENTIFICADOR_VOZ_FIXA no loop persistente."""
+        """Gera e decodifica o áudio neural usando a voz configurada no loop persistente."""
+        if self._pockettts is not None and self.idioma == "pt-BR":
+            try:
+                return self._pockettts.sintetizar(texto_prosodia)
+            except Exception as erro:
+                print(f"  [Voz] PocketTTS indisponivel ({erro}); usando voz de nuvem.")
+                self._pockettts.encerrar()
+                self._pockettts = None
+                self.voz_id = obter_voz_para_idioma(self.idioma)
+                self._identidade_cache = self.voz_id
+                self._motor_ativo = "neural_hd_fixo" if self._edge_disponivel else "windows_fallback"
+
+        if not self._edge_disponivel:
+            raise RuntimeError("PocketTTS e Edge TTS estao indisponiveis.")
+
         import av
         import edge_tts
 
@@ -381,21 +437,20 @@ class SintetizadorVoz:
             audio = audio[:, 0]
         return audio, taxa
 
-    def _reproduzir_com_lipsync_real(self, amostras: np.ndarray, taxa: int, texto_falado: str = "") -> None:
-        """Reproduz o áudio nos alto-falantes, envia visemas fonéticos + RMS labial e monitora Barge-In."""
+    def _reproduzir_audio(self, amostras: np.ndarray, taxa: int) -> None:
+        """Reproduz o áudio, publica seu nível normalizado e monitora Barge-In."""
         import sounddevice as sd
-        from gideon.voz.visemas import converter_texto_em_sequencia_visemas, calcular_frame_lipsync_audio
 
-        parar_labios = threading.Event()
-        passo_segundos = 0.033  # Atualiza os visemas e a mandíbula ~30 vezes por segundo
+        parar_monitoramento = threading.Event()
+        passo_segundos = 0.04  # 25 Hz mantém o orbe responsivo sem sobrecarregar o WebSocket.
         tamanho_janela = max(1, int(taxa * passo_segundos))
         total_amostras = len(amostras)
         duracao_total = total_amostras / float(taxa)
-        sequencia_visemas = converter_texto_em_sequencia_visemas(texto_falado, duracao_total)
+        pico_audio = max(float(np.max(np.abs(amostras))), 1e-9)
 
-        def _loop_envelope_labial():
+        def _loop_nivel_voz():
             inicio = time.perf_counter()
-            while not parar_labios.is_set() and not self._evento_interromper.is_set():
+            while not parar_monitoramento.is_set() and not self._evento_interromper.is_set():
                 decorrido = time.perf_counter() - inicio
                 idx_atual = int(decorrido * taxa)
                 if idx_atual >= total_amostras:
@@ -405,21 +460,12 @@ class SintetizadorVoz:
                 if len(fatia) > 0:
                     rms = float(np.sqrt(np.mean(np.square(fatia))))
                     self.rms_saida_atual = rms
+                    nivel = max(0.0, min(1.0, rms / pico_audio))
                 else:
                     self.rms_saida_atual = 0.0
+                    nivel = 0.0
 
-                quadro_lipsync = calcular_frame_lipsync_audio(
-                    fatia_pcm=fatia,
-                    taxa_amostragem=taxa,
-                    tempo_decorrido_s=decorrido,
-                    sequencia_visemas=sequencia_visemas,
-                )
-
-                self._notificar({
-                    "tipo": "fala_chunk",
-                    "texto": "",
-                    **quadro_lipsync,
-                })
+                self._notificar({"tipo": "voz_nivel", "nivel": nivel})
                 time.sleep(passo_segundos)
 
         def _loop_barge_in():
@@ -433,9 +479,9 @@ class SintetizadorVoz:
             capturados: list[np.ndarray] = []
 
             try:
-                time.sleep(0.18)
+                pass  # TURBO: sleep removido
                 with sd.InputStream(samplerate=taxa_mic, channels=1, dtype="float32") as mic:
-                    while not parar_labios.is_set() and not self._evento_interromper.is_set():
+                    while not parar_monitoramento.is_set() and not self._evento_interromper.is_set():
                         dados, _ = mic.read(chunk_mic)
                         bloco = dados - np.mean(dados)
                         rms_mic = float(np.sqrt(np.mean(bloco ** 2)))
@@ -456,9 +502,9 @@ class SintetizadorVoz:
             except Exception:
                 pass
 
-        thread_labios = threading.Thread(target=_loop_envelope_labial, daemon=True)
+        thread_nivel = threading.Thread(target=_loop_nivel_voz, daemon=True)
         thread_barge = threading.Thread(target=_loop_barge_in, daemon=True)
-        thread_labios.start()
+        thread_nivel.start()
         thread_barge.start()
 
         try:
@@ -468,27 +514,29 @@ class SintetizadorVoz:
                 if self._evento_interromper.is_set():
                     sd.stop()
                     break
-                time.sleep(0.025)
+                pass  # TURBO: sleep removido
         finally:
-            parar_labios.set()
-            thread_labios.join(timeout=0.2)
+            parar_monitoramento.set()
+            thread_nivel.join(timeout=0.2)
             thread_barge.join(timeout=0.2)
+            self.rms_saida_atual = 0.0
+            self._notificar({"tipo": "voz_nivel", "nivel": 0.0})
 
-    def _falar_windows_com_lipsync(self, texto: str) -> None:
+    def _falar_windows_fallback(self, texto: str) -> None:
         """Política explícita de recuperação offline via System.Speech."""
         duracao_estimada = max(1.0, len(texto) / 14.0)
-        parar_labios = threading.Event()
+        parar_nivel = threading.Event()
 
-        def _animar_estimado():
+        def _publicar_nivel_estimado():
             inicio = time.time()
-            while not parar_labios.is_set() and not self._evento_interromper.is_set():
+            while not parar_nivel.is_set() and not self._evento_interromper.is_set():
                 if time.time() - inicio > duracao_estimada + 1.0:
                     break
-                self._notificar({"tipo": "fala_chunk", "texto": "", "intensidade": 0.45})
-                time.sleep(0.08)
+                self._notificar({"tipo": "voz_nivel", "nivel": 0.45})
+                pass  # TURBO: sleep removido
 
-        thread_labios = threading.Thread(target=_animar_estimado, daemon=True)
-        thread_labios.start()
+        thread_nivel = threading.Thread(target=_publicar_nivel_estimado, daemon=True)
+        thread_nivel.start()
 
         try:
             texto_escapado = texto.replace("'", "''").replace('"', '`"')
@@ -502,16 +550,18 @@ class SintetizadorVoz:
             $speak.Speak('{texto_escapado}');
             """
             self._processo_windows = subprocess.Popen(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", comando_ps],
+                [comando_powershell(), "-NoProfile", "-NonInteractive", "-Command", comando_ps],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                **opcoes_processo_oculto(),
             )
             while self._processo_windows.poll() is None:
                 if self._evento_interromper.is_set():
                     self._processo_windows.terminate()
                     break
-                time.sleep(0.04)
+                pass  # TURBO: sleep removido
         finally:
             self._processo_windows = None
-            parar_labios.set()
-            thread_labios.join(timeout=0.2)
+            parar_nivel.set()
+            thread_nivel.join(timeout=0.2)
+            self._notificar({"tipo": "voz_nivel", "nivel": 0.0})
