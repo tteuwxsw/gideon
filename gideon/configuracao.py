@@ -40,6 +40,35 @@ CONFIG_PADRAO: dict[str, Any] = {
     "modo_personalidade": "padrao",
     "sons_interface_ativos": True,
     "volume_sons_interface": 0.18,
+    "modo_atividade": "normal",
+    "retencao_capturas_minutos": 5,
+    "ollama_modelo": "llama3.2:3b",
+    "avisos_proativos": {
+        "bateria": True,
+        "disco": True,
+        "temperatura": True,
+        "ram": True,
+        "cpu": True,
+        "internet": True,
+        "pausa": True,
+        "compromissos": True,
+        "retorno": True,
+        "pausa_minutos": 90,
+        "antecedencia_compromisso_minutos": 15,
+        "horario_silencioso_inicio": "22:30",
+        "horario_silencioso_fim": "07:00",
+        "cooldown_minutos": {
+            "bateria_baixa": 60,
+            "disco_cheio": 120,
+            "temperatura_alta": 45,
+            "ram_alta": 45,
+            "cpu_alta": 30,
+            "internet_caindo": 30,
+            "pausa_uso": 90,
+            "compromisso_proximo": 60,
+            "retorno_ausente": 30
+        }
+    },
 }
 
 
@@ -136,6 +165,51 @@ def definir_configuracao_sons(ativo: bool, volume: float) -> dict[str, Any]:
     config["volume_sons_interface"] = volume_seguro
     salvar_configuracao(config)
     return {"ativo": bool(ativo), "volume": volume_seguro}
+
+
+def obter_configuracao_avisos() -> dict[str, Any]:
+    """Retorna avisos proativos mesclados com os padrões atuais."""
+    padrao = dict(CONFIG_PADRAO["avisos_proativos"])
+    padrao["cooldown_minutos"] = dict(padrao["cooldown_minutos"])
+    salvo = carregar_configuracao().get("avisos_proativos", {})
+    if isinstance(salvo, dict):
+        cooldowns = salvo.get("cooldown_minutos", {})
+        padrao.update({k: v for k, v in salvo.items() if k != "cooldown_minutos"})
+        if isinstance(cooldowns, dict):
+            padrao["cooldown_minutos"].update(cooldowns)
+    return padrao
+
+
+def obter_modo_atividade() -> str:
+    """Retorna normal, foco ou cinema para controle de avisos falados."""
+    modo = str(carregar_configuracao().get("modo_atividade", "normal")).strip().lower()
+    return modo if modo in {"normal", "foco", "cinema"} else "normal"
+
+
+def definir_modo_atividade(modo: str) -> str:
+    """Persiste o contexto de atividade explicitamente solicitado pelo usuário."""
+    modo_normalizado = str(modo).strip().lower()
+    if modo_normalizado not in {"normal", "foco", "cinema"}:
+        raise ValueError(f"Modo de atividade inválido: {modo}")
+    config = carregar_configuracao()
+    config["modo_atividade"] = modo_normalizado
+    salvar_configuracao(config)
+    return modo_normalizado
+
+
+def obter_retencao_capturas_minutos() -> int:
+    """Retorna retenção curta de capturas explícitas, entre zero e 60 minutos."""
+    try:
+        minutos = int(carregar_configuracao().get("retencao_capturas_minutos", 5))
+    except (TypeError, ValueError):
+        minutos = 5
+    return max(0, min(60, minutos))
+
+
+def obter_modelo_ollama() -> str:
+    """Retorna apenas o nome local do modelo Ollama, nunca uma URL externa."""
+    modelo = str(carregar_configuracao().get("ollama_modelo", "llama3.2:3b")).strip()
+    return modelo or "llama3.2:3b"
 
 
 def obter_voz_para_idioma(idioma: str | None = None) -> str:

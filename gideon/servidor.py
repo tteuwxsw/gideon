@@ -459,6 +459,12 @@ async def chat_stream(req: MensagemRequisicao, _: bool = Depends(autenticar)):
     if not texto_usuario:
         raise HTTPException(status_code=400, detail="A mensagem não pode ser vazia.")
 
+    from gideon.voz.comandos import detectar_modo_atividade
+    modo_atividade = detectar_modo_atividade(texto_usuario)
+    if modo_atividade:
+        from gideon.configuracao import definir_modo_atividade
+        definir_modo_atividade(modo_atividade)
+
     historico_conversa.append({"role": "user", "content": texto_usuario})
 
     # 1. Verifica se é um comando explícito de memória ou uma intenção de execução real no Windows

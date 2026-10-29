@@ -1,13 +1,17 @@
 """Conector do cérebro da Gideon com suporte a streaming, Function Calling e custos."""
 
 from typing import Generator, Any
+import json
 import os
 import re
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 import keyring
 from google import genai
 from google.genai import types
 from gideon.gate import LIMITE_DIARIO_USD, gasto_diario_atual, somar_gasto
 from gideon.persona import obter_prompt_sistema
+from gideon.configuracao import obter_modelo_ollama
 
 # Preços de referência por 1 milhão de tokens (USD)
 # Na cota do plano o custo real é $0, mas calculamos para telemetria
@@ -117,6 +121,107 @@ class Cerebro:
         custo_prompt = (prompt_tokens / 1_000_000) * PRECO_PROMPT_1M
         custo_resposta = (resposta_tokens / 1_000_000) * PRECO_RESPOSTA_1M
         return custo_prompt + custo_resposta
+
+    @staticmethod
+    def _erro_de_conexao(erro: Exception | str) -> bool:
+        texto = str(erro).lower()
+        return any(
+            trecho in texto
+            for trecho in (
+                "failed to connect", "connection refused", "connection reset",
+                "name resolution", "network is unreachable", "temporary failure in name resolution",
+                "getaddrinfo failed", "timed out",
+                "unavailable", "503",
+            )
+        )
+
+    def _pensar_ollama(
+        self,
+        mensagens: list[dict[str, str]],
+        lembrancas: str,
+        licoes: str,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Fallback estritamente local via API do Ollama, sem ferramentas."""
+        modelo = obter_modelo_ollama()
+        prompt_sistema = obter_prompt_sistema(lembrancas=lembrancas, licoes=licoes)
+        mensagens_ollama = [{"role": "system", "content": prompt_sistema}]
+        mensagens_ollama.extend(
+            {
+                "role": "assistant" if item.get("role") == "assistant" else "user",
+                "content": str(item.get("content", "")),
+            }
+            for item in mensagens
+        )
+        corpo = json.dumps(
+            {
+                "model": modelo,
+                "messages": mensagens_ollama,
+                "stream": True,
+                "options": {"temperature": 0.65},
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        requisicao = urllib_request.Request(
+            "http://127.0.0.1:11434/api/chat",
+            data=corpo,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        prompt_tokens = 0
+        resposta_tokens = 0
+        texto_acumulado: list[str] = []
+        emitiu_aviso = False
+        try:
+            with urllib_request.urlopen(requisicao, timeout=8) as resposta:
+                for linha in resposta:
+                    if not linha.strip():
+                        continue
+                    evento = json.loads(linha.decode("utf-8"))
+                    if evento.get("error"):
+                        raise RuntimeError(str(evento["error"]))
+                    if not emitiu_aviso:
+                        emitiu_aviso = True
+                        yield {"tipo": "chunk", "texto": "Estou em modo offline. "}
+                    texto = str((evento.get("message") or {}).get("content") or "")
+                    if texto:
+                        texto_acumulado.append(texto)
+                        yield {"tipo": "chunk", "texto": texto}
+                    prompt_tokens = max(prompt_tokens, int(evento.get("prompt_eval_count") or 0))
+                    resposta_tokens = max(resposta_tokens, int(evento.get("eval_count") or 0))
+        except urllib_error.HTTPError as erro:
+            detalhe = erro.read().decode("utf-8", errors="ignore")[:300]
+            mensagem = (
+                f"O modelo local '{modelo}' não está disponível no Ollama. Instale-o antes de usar o modo offline."
+                if erro.code == 404 or "model" in detalhe.lower()
+                else "O Ollama local respondeu com erro. Verifique o serviço em localhost."
+            )
+            yield {"tipo": "erro", "mensagem": mensagem}
+            return
+        except (urllib_error.URLError, TimeoutError, OSError):
+            yield {
+                "tipo": "erro",
+                "mensagem": "Sem internet e o Ollama local não está instalado ou não está rodando em localhost.",
+            }
+            return
+        except Exception as erro:
+            yield {"tipo": "erro", "mensagem": f"O modelo local falhou: {str(erro)[:160]}"}
+            return
+
+        if not emitiu_aviso:
+            yield {"tipo": "erro", "mensagem": "O Ollama local não retornou uma resposta."}
+            return
+        if prompt_tokens == 0:
+            prompt_tokens = max(1, sum(len(item["content"]) for item in mensagens_ollama) // 4)
+        if resposta_tokens == 0:
+            resposta_tokens = max(1, len("".join(texto_acumulado)) // 4)
+        yield {
+            "tipo": "fim",
+            "prompt_tokens": prompt_tokens,
+            "resposta_tokens": resposta_tokens,
+            "total_tokens": prompt_tokens + resposta_tokens,
+            "custo_estimado": 0.0,
+            "modelo": f"ollama/{modelo}",
+        }
 
     def pensar_stream(
         self,
@@ -340,12 +445,17 @@ class Cerebro:
 
             except Exception as e:
                 ultimo_erro = e
+                if self._erro_de_conexao(e):
+                    break
                 # Se ainda não emitiu texto e restam modelos candidatos, avança para o próximo
                 if not texto_acumulado_geral and idx < len(candidatos) - 1:
                     continue
                 break
 
         erro_str = str(ultimo_erro or "Erro desconhecido")
+        if not texto_acumulado_geral and self._erro_de_conexao(erro_str):
+            yield from self._pensar_ollama(mensagens, lembrancas, licoes)
+            return
         if "429" in erro_str or "RESOURCE_EXHAUSTED" in erro_str:
             mensagem_amigavel = (
                 "O limite temporário de requisições foi atingido. "

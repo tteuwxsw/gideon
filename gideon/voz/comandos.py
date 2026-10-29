@@ -224,6 +224,19 @@ def detectar_modo_personalidade(texto: str) -> str | None:
     return None
 
 
+def detectar_modo_atividade(texto: str) -> str | None:
+    """Detecta entrada e saída explícitas dos modos que silenciam avisos falados."""
+    t = re.sub(r"[^a-z0-9 ]", " ", normalizar(texto))
+    t = " ".join(t.split())
+    if re.search(r"\b(?:sair|encerrar|cancelar|parar|desativar) (?:do )?modo (?:foco|cinema)\b", t):
+        return "normal"
+    if re.search(r"\b(?:ativar|iniciar|comecar) (?:o )?modo foco\b", t):
+        return "foco"
+    if re.search(r"\b(?:ativar|iniciar|preparar) (?:o )?modo cinema\b", t) or "hora do filme" in t:
+        return "cinema"
+    return None
+
+
 def eh_pergunta_modo_personalidade(texto: str) -> bool:
     """Reconhece perguntas curtas sobre o modo de personalidade atual."""
     t = re.sub(r"[^a-z0-9 ]", " ", normalizar(texto))
@@ -810,11 +823,22 @@ def interpretar_intencao_natural(
             "novo_contexto": {"ultimo_topico": "hardware_pc", "ultimo_recurso": "geral"},
         }
 
-    # 15.5. Consciência de tela e janela ativa ("o que está na minha tela?", "qual janela está ativa?", "analisa minha tela")
+    # 15.5. Análise visual somente após pedido explícito do usuário.
     if re.search(
-        r"\b(o que esta na minha tela|qual janela esta ativa|qual janela esta aberta|analisa minha tela|olha minha tela|o que estou vendo|janela atual)\b",
+        r"\b(o que (?:tem|esta) na minha tela|analisa minha tela|olha minha tela|o que estou vendo|explica esse erro|"
+        r"explique esse erro|resume o que estou lendo|resuma o que estou lendo|analisa mesmo assim|analise mesmo assim)\b",
         t_limpo,
     ):
+        return {
+            "acao": "analisar_tela",
+            "parametros": {
+                "pergunta": texto.strip(),
+                "permitir_conteudo_sensivel": "mesmo assim" in t_limpo,
+            },
+            "novo_contexto": {"ultimo_topico": "tela"},
+        }
+
+    if re.search(r"\b(qual janela esta ativa|qual janela esta aberta|janela atual)\b", t_limpo):
         return {
             "acao": "inspecionar_contexto_tela",
             "parametros": {},

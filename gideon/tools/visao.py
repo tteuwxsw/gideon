@@ -12,6 +12,10 @@ from datetime import datetime
 import io
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import threading
 import time
 from typing import Any
 
@@ -21,7 +25,36 @@ from gideon.caminhos import DADOS_DIR
 from gideon.gate import Ferramenta, Risco
 
 PASTA_CAPTURAS = DADOS_DIR / "capturas"
-PASTA_CAPTURAS.mkdir(parents=True, exist_ok=True)
+
+
+class ErroCapturaTela(RuntimeError):
+    """Falha amigável de captura em Wayland/X11."""
+
+
+def _capturar_linux() -> Image.Image:
+    sessao = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    try:
+        if sessao == "wayland" and shutil.which("grim"):
+            resultado = subprocess.run(["grim", "-"], capture_output=True, timeout=8, check=True)
+            return Image.open(io.BytesIO(resultado.stdout)).convert("RGB")
+
+        if sessao == "wayland" and shutil.which("gnome-screenshot"):
+            PASTA_CAPTURAS.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(suffix=".png", dir=PASTA_CAPTURAS, delete=False) as temp:
+                caminho_temp = Path(temp.name)
+            try:
+                subprocess.run(["gnome-screenshot", "-f", str(caminho_temp)], capture_output=True, timeout=8, check=True)
+                with Image.open(caminho_temp) as imagem:
+                    return imagem.convert("RGB")
+            finally:
+                caminho_temp.unlink(missing_ok=True)
+
+        return ImageGrab.grab(all_screens=True).convert("RGB")
+    except Exception as erro:
+        ambiente = "Wayland" if sessao == "wayland" else "X11"
+        raise ErroCapturaTela(
+            f"Não consegui capturar a tela no {ambiente}. Verifique a permissão de captura de tela do Zorin."
+        ) from erro
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -41,9 +74,9 @@ class BITMAPINFOHEADER(ctypes.Structure):
 
 
 def capturar_tela_imagem() -> Image.Image:
-    """Captura a tela inteira via Win32 BitBlt com velocidade ultrarrápida (0-2ms)."""
+    """Captura sob demanda, com caminhos compatíveis com Wayland, X11 e Windows."""
     if os.name != "nt":
-        return ImageGrab.grab(all_screens=True).convert("RGB")
+        return _capturar_linux()
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
 
@@ -85,7 +118,6 @@ def capturar_tela_imagem() -> Image.Image:
         return imagem
     except Exception:
         # Fallback via Pillow ImageGrab se BitBlt falhar
-        from PIL import ImageGrab
         return ImageGrab.grab()
     finally:
         gdi32.SelectObject(hdc_mem, h_antigo)
@@ -94,16 +126,50 @@ def capturar_tela_imagem() -> Image.Image:
         user32.ReleaseDC(hwnd_desktop, hdc_screen)
 
 
-def capturar_tela(salvar_arquivo: bool = True) -> dict[str, Any]:
+def _apagar_captura_depois(caminho: Path, minutos: int) -> None:
+    def apagar() -> None:
+        try:
+            caminho.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    timer = threading.Timer(max(1, minutos * 60), apagar)
+    timer.daemon = True
+    timer.start()
+
+
+def _limpar_capturas_expiradas(minutos: int) -> None:
+    """Remove capturas antigas que sobreviveram a uma reinicialização."""
+    if not PASTA_CAPTURAS.exists():
+        return
+    limite = time.time() - max(1, minutos * 60)
+    for caminho in PASTA_CAPTURAS.glob("tela_*.jpg"):
+        try:
+            if caminho.stat().st_mtime < limite:
+                caminho.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def capturar_tela(salvar_arquivo: bool = False) -> dict[str, Any]:
     """Captura a tela atual do computador do Henry e salva a imagem."""
-    imagem = capturar_tela_imagem()
+    try:
+        imagem = capturar_tela_imagem()
+    except ErroCapturaTela as erro:
+        return {"sucesso": False, "erro": str(erro), "mensagem_humana": str(erro)}
     agora = datetime.now()
-    timestamp = agora.strftime("%Y%m%d_%H%M%S")
+    timestamp = agora.strftime("%Y%m%d_%H%M%S_%f")
     caminho_arquivo = PASTA_CAPTURAS / f"tela_{timestamp}.jpg"
 
     if salvar_arquivo:
+        from gideon.configuracao import obter_retencao_capturas_minutos
+
+        retencao_minutos = obter_retencao_capturas_minutos()
+        PASTA_CAPTURAS.mkdir(parents=True, exist_ok=True)
+        _limpar_capturas_expiradas(retencao_minutos)
         imagem.save(str(caminho_arquivo), format="JPEG", quality=85)
         arquivo_str = str(caminho_arquivo)
+        _apagar_captura_depois(caminho_arquivo, retencao_minutos)
     else:
         arquivo_str = ""
 
@@ -117,14 +183,95 @@ def capturar_tela(salvar_arquivo: bool = True) -> dict[str, Any]:
     }
 
 
-def analisar_tela(pergunta: str = "O que está visível na tela no momento?") -> dict[str, Any]:
+def _texto_local_tela() -> str:
+    """Obtém apenas indícios locais para bloquear telas sensíveis antes do upload."""
+    partes: list[str] = []
+    try:
+        from gideon.presenca import inspecionar_janela_ativa_segura
+
+        janela = inspecionar_janela_ativa_segura()
+        if janela.get("protegida_privacidade"):
+            partes.append("janela protegida senha banco")
+        partes.extend([str(janela.get("titulo", "")), str(janela.get("processo", ""))])
+    except Exception:
+        pass
+    if os.name != "nt" and shutil.which("xdotool"):
+        try:
+            titulo = subprocess.run(
+                ["xdotool", "getactivewindow", "getwindowname"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            ).stdout
+            partes.append(titulo)
+        except Exception:
+            pass
+    return " ".join(partes).lower()
+
+
+def _parece_conteudo_sensivel(imagem: Image.Image) -> bool:
+    texto = _texto_local_tela()
+    try:
+        import pytesseract
+
+        texto += " " + pytesseract.image_to_string(imagem.resize((min(1200, imagem.width), int(imagem.height * min(1200, imagem.width) / imagem.width))))[:6000].lower()
+    except Exception:
+        pass
+    palavras = (
+        "senha", "password", "passphrase", "cvv", "internet banking", "dados bancarios",
+        "dados bancários", "numero do cartao", "número do cartão", "agencia e conta",
+        "agência e conta", "chave privada", "seed phrase", "metamask", "bitwarden",
+    )
+    if any(palavra in texto for palavra in palavras):
+        return True
+    import re
+    return bool(re.search(r"(?:\d[ -]?){13,19}", texto))
+
+
+def _verificacao_privacidade_disponivel() -> bool:
+    """Evita upload cego no Wayland quando não há título nem OCR local."""
+    if os.name == "nt" or shutil.which("tesseract"):
+        return True
+    if shutil.which("xdotool"):
+        try:
+            return bool(subprocess.run(
+                ["xdotool", "getactivewindow", "getwindowname"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            ).stdout.strip())
+        except Exception:
+            return False
+    return False
+
+
+def analisar_tela(
+    pergunta: str = "O que está visível na tela no momento?",
+    permitir_conteudo_sensivel: bool = False,
+) -> dict[str, Any]:
     """Captura a tela do computador e analisa visualmente com o Gemini Vision em tempo real."""
     import keyring
     from google import genai
     from google.genai import types
     from gideon.configuracao import obter_idioma
 
-    imagem = capturar_tela_imagem()
+    try:
+        imagem = capturar_tela_imagem()
+    except ErroCapturaTela as erro:
+        return {"sucesso": False, "erro": str(erro), "mensagem_humana": str(erro)}
+
+    sensivel = _parece_conteudo_sensivel(imagem)
+    privacidade_verificavel = _verificacao_privacidade_disponivel()
+    if (sensivel or not privacidade_verificavel) and not permitir_conteudo_sensivel:
+        return {
+            "sucesso": False,
+            "requer_confirmacao": True,
+            "erro": "Conteúdo potencialmente sensível ou não verificável localmente.",
+            "mensagem_humana": (
+                "A tela parece conter dados sensíveis, ou não consegui verificá-la localmente. Não enviei a captura. "
+                "Se quiser prosseguir, peça explicitamente para analisar mesmo assim."
+            ),
+        }
     buffer = io.BytesIO()
     # Redimensiona proporcionalmente para no máximo 1600px se necessário para otimizar tokens
     if imagem.width > 1600:
@@ -145,10 +292,13 @@ def analisar_tela(pergunta: str = "O que está visível na tela no momento?") ->
         }
 
     idioma = obter_idioma()
+    from gideon.configuracao import obter_modo_personalidade
+    modo = obter_modo_personalidade()
     prompt_visao = (
         f"Você é a Gideon, inteligência artificial do Henry. Analise a captura de tela do computador dele.\n"
         f"Pergunta do Senhor Henry: '{pergunta}'.\n"
         f"Responda diretamente e com elegância em Português do Brasil (pt-BR). "
+        f"Use o estilo de personalidade '{modo}' e no máximo 3 frases, pois a resposta será falada. "
         f"Destaque janelas ativas, mensagens de erro, abas abertas, conteúdos em foco ou qualquer detalhe relevante."
     )
 
@@ -187,7 +337,7 @@ def analisar_tela(pergunta: str = "O que está visível na tela no momento?") ->
         }
 
 
-def localizar_elemento_na_tela(elemento: str) -> dict[str, Any]:
+def localizar_elemento_na_tela(elemento: str, permitir_conteudo_sensivel: bool = False) -> dict[str, Any]:
     """Localiza visualmente um elemento, botão ou ícone na tela e retorna suas coordenadas estimadas."""
     import keyring
     import json
@@ -195,7 +345,17 @@ def localizar_elemento_na_tela(elemento: str) -> dict[str, Any]:
     from google import genai
     from google.genai import types
 
-    imagem = capturar_tela_imagem()
+    try:
+        imagem = capturar_tela_imagem()
+    except ErroCapturaTela as erro:
+        return {"sucesso": False, "erro": str(erro), "mensagem_humana": str(erro)}
+    if (_parece_conteudo_sensivel(imagem) or not _verificacao_privacidade_disponivel()) and not permitir_conteudo_sensivel:
+        return {
+            "sucesso": False,
+            "requer_confirmacao": True,
+            "erro": "Conteúdo potencialmente sensível ou não verificável localmente.",
+            "mensagem_humana": "Não localizei o elemento porque a tela pode conter dados sensíveis.",
+        }
     buffer = io.BytesIO()
     imagem.save(buffer, format="JPEG", quality=85)
     bytes_imagem = buffer.getvalue()
@@ -247,6 +407,7 @@ FERRAMENTAS_VISAO: list[Ferramenta] = [
                 "salvar_arquivo": {"type": "boolean", "description": "Se deve salvar a captura em disco."},
             },
         },
+        expor_ao_modelo=False,
     ),
     Ferramenta(
         nome="analisar_tela",
@@ -258,8 +419,11 @@ FERRAMENTAS_VISAO: list[Ferramenta] = [
             "type": "object",
             "properties": {
                 "pergunta": {"type": "string", "description": "O que você deseja verificar ou perguntar sobre o que está na tela."},
+                "permitir_conteudo_sensivel": {"type": "boolean", "description": "Somente true após pedido explícito e confirmação."},
             },
         },
+        risco_dinamico=lambda permitir_conteudo_sensivel=False, **kwargs: Risco.VERMELHO if permitir_conteudo_sensivel else Risco.VERDE,
+        expor_ao_modelo=False,
     ),
     Ferramenta(
         nome="localizar_elemento_na_tela",
@@ -271,8 +435,11 @@ FERRAMENTAS_VISAO: list[Ferramenta] = [
             "type": "object",
             "properties": {
                 "elemento": {"type": "string", "description": "Nome ou descrição do botão/ícone a localizar."},
+                "permitir_conteudo_sensivel": {"type": "boolean", "description": "Somente true após confirmação explícita."},
             },
             "required": ["elemento"],
         },
+        risco_dinamico=lambda permitir_conteudo_sensivel=False, **kwargs: Risco.VERMELHO if permitir_conteudo_sensivel else Risco.VERDE,
+        expor_ao_modelo=False,
     ),
 ]

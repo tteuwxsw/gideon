@@ -13,6 +13,7 @@ import numpy as np
 from gideon.cerebro import Cerebro
 from gideon.configuracao import (
     definir_interrupcao_voz_ativa,
+    definir_modo_atividade,
     definir_modo_personalidade,
     obter_configuracao_sons,
     obter_interrupcao_voz_ativa,
@@ -25,6 +26,7 @@ from gideon.tools import obter_catalogo_ferramentas
 from gideon.voz.comandos import (
     avaliar_fala_direcionada,
     detectar_comando_sistema,
+    detectar_modo_atividade,
     detectar_modo_personalidade,
     detectar_mudanca_modo_escuta,
     eh_pergunta_modo_personalidade,
@@ -322,6 +324,9 @@ class OrquestradorVoz:
         """Resolve solicitações localmente e executa ferramentas com verificação real no Windows."""
         t0 = time.perf_counter()
         comando_limpo = comando.strip()
+        modo_atividade = detectar_modo_atividade(comando_limpo)
+        if modo_atividade:
+            definir_modo_atividade(modo_atividade)
 
         # 0. Chamado de presença ("Gideon" ou "Gideon, você está aí?")
         if not comando_limpo or comando_limpo == "__PRESENCA__":

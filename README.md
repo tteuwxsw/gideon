@@ -53,7 +53,7 @@ logs.
 - 🧠 IA Gemini integrada
 - 🖥️ Automação desktop
 - 📱 Interface web local
-- 🔒 Privacidade total (roda offline)
+- 🔒 Dados locais protegidos; respostas usam Gemini e podem recorrer ao Ollama local quando configurado e sem conexão
 
 ---
 
