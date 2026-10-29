@@ -41,6 +41,62 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+.boot-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  background: #000;
+  color: var(--text-secondary);
+}
+
+.boot-core {
+  display: grid;
+  width: 4.5rem;
+  height: 4.5rem;
+  place-items: center;
+  border: 1px solid rgba(145, 175, 184, 0.35);
+  border-radius: 50%;
+  color: var(--accent-strong);
+  font-size: 2rem;
+  font-weight: 300;
+  box-shadow: 0 0 2.5rem rgba(125, 160, 199, 0.14);
+}
+
+.boot-log {
+  width: min(24rem, calc(100vw - 3rem));
+  min-height: 7rem;
+  font: 0.72rem/1.8 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+
+.boot-log p { margin: 0; animation: boot-line-in 180ms ease-out both; }
+.boot-log p span { color: var(--text-tertiary); }
+.boot-log p.online { color: var(--success); }
+
+.boot-skip {
+  border: 0;
+  color: var(--text-tertiary);
+  background: transparent;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.boot-skip:hover { color: var(--text-secondary); }
+
+@keyframes boot-line-in {
+  from { opacity: 0; transform: translateY(0.25rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-log p { animation: none; }
+}
+
 button, textarea { font: inherit; }
 button { user-select: none; }
 
@@ -493,6 +549,10 @@ button { user-select: none; }
 .setting-option:hover { background: rgba(255,255,255,.055); border-color: var(--line-strong); }
 .setting-option.selected { color: var(--text); background: rgba(141,180,198,.1); border-color: rgba(141,180,198,.28); }
 .setting-help { margin: -.1rem 0 .7rem; color: var(--text-tertiary); font-size: .7rem; line-height: 1.5; }
+.sound-volume-row { display: flex; align-items: center; gap: .75rem; margin-top: .65rem; color: var(--text-tertiary); font-size: .7rem; }
+.sound-volume-row input { min-width: 0; flex: 1; accent-color: var(--accent); }
+.sound-volume-row input:disabled { opacity: .4; }
+.sound-volume-row span { width: 2.25rem; text-align: right; }
 .integration-status { margin-left: auto; color: var(--text-tertiary); font-size: .65rem; font-weight: 500; }
 .integration-status.connected { color: var(--success); }
 .api-key-row { display: flex; gap: .5rem; }

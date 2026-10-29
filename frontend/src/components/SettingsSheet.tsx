@@ -1,7 +1,7 @@
 ﻿import React, { useState, useEffect } from 'react'
 import { useRef } from 'react'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
-import { X, Globe, Radio, AlertOctagon, RefreshCw, Trash2, Check, KeyRound } from 'lucide-react'
+import { X, Globe, Radio, AlertOctagon, RefreshCw, Trash2, Check, KeyRound, Volume2 } from 'lucide-react'
 import type { IdiomaOpcao, ModoEscuta } from '../types'
 import { apiError, apiFetch } from '../api'
 
@@ -14,6 +14,9 @@ interface SettingsSheetProps {
   onChangeVoiceMode: (modo: ModoEscuta) => Promise<void>
   voiceInterruptionEnabled: boolean
   onChangeVoiceInterruption: (ativa: boolean) => Promise<void>
+  interfaceSoundsEnabled: boolean
+  interfaceSoundsVolume: number
+  onChangeInterfaceSounds: (ativa: boolean, volume: number) => Promise<void>
   onEmergencyStop: () => Promise<void>
   onEmergencyResume: () => Promise<void>
   onClearChat: () => Promise<void>
@@ -28,6 +31,9 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
   onChangeVoiceMode,
   voiceInterruptionEnabled,
   onChangeVoiceInterruption,
+  interfaceSoundsEnabled,
+  interfaceSoundsVolume,
+  onChangeInterfaceSounds,
   onEmergencyStop,
   onEmergencyResume,
   onClearChat
@@ -256,6 +262,49 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
                       <div className="text-[10px] text-slate-400">{m.desc}</div>
                     </button>
                   ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="setting-label" htmlFor="interface-sound-volume">
+                  <Volume2 className="w-4 h-4" />
+                  <span>Sons da interface</span>
+                </label>
+                <div className="setting-grid" role="group" aria-label="Sons da interface">
+                  {[true, false].map((ativa) => (
+                    <button
+                      key={String(ativa)}
+                      type="button"
+                      aria-pressed={interfaceSoundsEnabled === ativa}
+                      onClick={() => runAction(
+                        () => onChangeInterfaceSounds(ativa, interfaceSoundsVolume),
+                        `Sons da interface ${ativa ? 'ativados' : 'desativados'}.`
+                      )}
+                      className={`setting-option ${interfaceSoundsEnabled === ativa ? 'selected' : ''}`}
+                    >
+                      <div className="font-medium text-xs">{ativa ? 'Ativados' : 'Desativados'}</div>
+                    </button>
+                  ))}
+                </div>
+                <div className="sound-volume-row">
+                  <input
+                    id="interface-sound-volume"
+                    type="range"
+                    min="0"
+                    max="0.5"
+                    step="0.05"
+                    value={interfaceSoundsVolume}
+                    disabled={!interfaceSoundsEnabled}
+                    onChange={(event) => {
+                      const volume = Number(event.target.value)
+                      void runAction(
+                        () => onChangeInterfaceSounds(true, volume),
+                        `Volume dos sons em ${Math.round(volume * 100)}%.`
+                      )
+                    }}
+                    aria-label="Volume dos sons da interface"
+                  />
+                  <span>{Math.round(interfaceSoundsVolume * 100)}%</span>
                 </div>
               </div>
 

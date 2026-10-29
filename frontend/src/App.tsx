@@ -1,10 +1,11 @@
-﻿import React, { useState, useEffect, useRef } from 'react'
+﻿import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { HolographicOrb } from './components/HolographicOrb'
 import { ChatTimeline } from './components/ChatTimeline'
 import { ChatInput } from './components/ChatInput'
 import { VoiceStatus } from './components/VoiceStatus'
 import { SettingsSheet } from './components/SettingsSheet'
 import { ActivityDrawer } from './components/ActivityDrawer'
+import { BootScreen } from './components/BootScreen'
 import { Settings, Activity, ShieldAlert, WifiOff } from 'lucide-react'
 import type { Message, ModoEscuta } from './types'
 import { apiError, apiFetch, messageId } from './api'
@@ -21,6 +22,9 @@ export const App: React.FC = () => {
   const [currentLanguage, setCurrentLanguage] = useState('pt-BR')
   const [voiceMode, setVoiceMode] = useState<ModoEscuta>('ativacao_por_nome')
   const [voiceInterruptionEnabled, setVoiceInterruptionEnabled] = useState(true)
+  const [interfaceSoundsEnabled, setInterfaceSoundsEnabled] = useState(true)
+  const [interfaceSoundsVolume, setInterfaceSoundsVolume] = useState(0.18)
+  const [showBoot, setShowBoot] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
   const [authReady, setAuthReady] = useState(false)
@@ -34,6 +38,11 @@ export const App: React.FC = () => {
   const reconnectTimerRef = useRef<number | undefined>(undefined)
   const chatAbortRef = useRef<AbortController | null>(null)
   const chatBusyRef = useRef(false)
+  const soundConfigRef = useRef({ enabled: true, volume: 0.18 })
+
+  useEffect(() => {
+    soundConfigRef.current = { enabled: interfaceSoundsEnabled, volume: interfaceSoundsVolume }
+  }, [interfaceSoundsEnabled, interfaceSoundsVolume])
 
   useEffect(() => {
     if (authStartedRef.current) return
@@ -59,10 +68,11 @@ export const App: React.FC = () => {
         const statusResponse = await apiFetch('/api/status')
         if (!statusResponse.ok) throw new Error('Abra a Gideon pelo atalho do aplicativo.')
         const status = await statusResponse.json()
-        const [languageResponse, voiceResponse, geminiResponse] = await Promise.all([
+        const [languageResponse, voiceResponse, geminiResponse, soundsResponse] = await Promise.all([
           apiFetch('/api/idioma'),
           apiFetch('/api/voz/status'),
-          apiFetch('/api/gemini/status')
+          apiFetch('/api/gemini/status'),
+          apiFetch('/api/configuracao/sons')
         ])
 
         setEmergencyStopped(Boolean(status.parada_emergencia))
@@ -84,6 +94,14 @@ export const App: React.FC = () => {
               nivel: 'info'
             })
           }
+        }
+        if (soundsResponse.ok) {
+          const sounds = await soundsResponse.json()
+          const enabled = Boolean(sounds.ativo)
+          const volume = Math.max(0, Math.min(0.5, Number(sounds.volume) || 0))
+          setInterfaceSoundsEnabled(enabled)
+          setInterfaceSoundsVolume(volume)
+          soundConfigRef.current = { enabled, volume }
         }
         setAuthReady(true)
       } catch (error) {
@@ -159,7 +177,12 @@ export const App: React.FC = () => {
               nivel: data.ativa ? 'danger' : 'success'
             })
           } else if (data.tipo === 'som') {
-            new Audio(`/api/sons/${data.som}`).play().catch(() => {})
+            const config = soundConfigRef.current
+            if (config.enabled) {
+              const audio = new Audio(`/api/sons/${data.som}`)
+              audio.volume = config.volume
+              audio.play().catch(() => {})
+            }
           } else if (data.tipo === 'alerta_vigilante') {
             setVigilanteAlert({ mensagem: data.mensagem, nivel: data.nivel || 'info' })
             window.setTimeout(() => setVigilanteAlert(null), 8000)
@@ -335,6 +358,11 @@ export const App: React.FC = () => {
 
   const chatBusy = chatPhase !== 'idle'
   const interfaceThinking = isThinking || chatBusy
+  const completeBoot = useCallback(() => setShowBoot(false), [])
+
+  if (showBoot) {
+    return <BootScreen onComplete={completeBoot} />
+  }
 
   if (authError) {
     return (
@@ -507,6 +535,21 @@ export const App: React.FC = () => {
           })
           if (!response.ok) throw new Error(await apiError(response))
           setVoiceInterruptionEnabled(ativa)
+        }}
+        interfaceSoundsEnabled={interfaceSoundsEnabled}
+        interfaceSoundsVolume={interfaceSoundsVolume}
+        onChangeInterfaceSounds={async (ativo, volume) => {
+          const response = await apiFetch('/api/configuracao/sons', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ ativo, volume })
+          })
+          if (!response.ok) throw new Error(await apiError(response))
+          setInterfaceSoundsEnabled(ativo)
+          setInterfaceSoundsVolume(volume)
+          soundConfigRef.current = { enabled: ativo, volume }
         }}
         onEmergencyStop={async () => {
           const response = await apiFetch('/api/emergencia/parar', { method: 'POST' })

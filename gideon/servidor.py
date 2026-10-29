@@ -102,6 +102,16 @@ async def broadcast_ws(evento: dict) -> None:
     """Envia um evento JSON para todos os clientes WebSocket conectados."""
     global _clientes_ws
     tipo = evento.get("tipo")
+    if tipo == "som":
+        from gideon.configuracao import obter_configuracao_sons
+
+        config_sons = obter_configuracao_sons()
+        microfone_gravando = bool(
+            orquestrador_voz
+            and getattr(getattr(orquestrador_voz, "ouvinte", None), "gravando", False)
+        )
+        if not config_sons["ativo"] or microfone_gravando:
+            return
     estado = None
     if tipo == "estado_ia":
         estado = evento.get("estado")
@@ -382,6 +392,27 @@ async def obter_som_api(tipo: str):
         return Response(content=dados_wav, media_type="audio/wav")
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+class ConfiguracaoSonsRequisicao(BaseModel):
+    ativo: bool
+    volume: float
+
+
+@app.get("/api/configuracao/sons")
+async def obter_configuracao_sons_api(_: bool = Depends(autenticar)):
+    """Retorna a preferência persistente dos earcons da interface."""
+    from gideon.configuracao import obter_configuracao_sons
+
+    return {"status": "ok", **obter_configuracao_sons()}
+
+
+@app.post("/api/configuracao/sons")
+async def definir_configuracao_sons_api(req: ConfiguracaoSonsRequisicao, _: bool = Depends(autenticar)):
+    """Liga/desliga earcons e limita o volume máximo a 50%."""
+    from gideon.configuracao import definir_configuracao_sons
+
+    return {"status": "ok", **definir_configuracao_sons(req.ativo, req.volume)}
 
 
 @app.post("/api/idioma")

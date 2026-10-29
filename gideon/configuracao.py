@@ -38,6 +38,8 @@ CONFIG_PADRAO: dict[str, Any] = {
     "idioma": "pt-BR",
     "interrupcao_voz_ativa": True,
     "modo_personalidade": "padrao",
+    "sons_interface_ativos": True,
+    "volume_sons_interface": 0.18,
 }
 
 
@@ -111,6 +113,29 @@ def definir_modo_personalidade(modo: str) -> str:
     config["modo_personalidade"] = modo_normalizado
     salvar_configuracao(config)
     return modo_normalizado
+
+
+def obter_configuracao_sons() -> dict[str, Any]:
+    """Retorna preferência e volume seguro dos earcons da interface."""
+    config = carregar_configuracao()
+    try:
+        volume = float(config.get("volume_sons_interface", 0.18))
+    except (TypeError, ValueError):
+        volume = 0.18
+    return {
+        "ativo": config.get("sons_interface_ativos", True) is True,
+        "volume": max(0.0, min(0.5, volume)),
+    }
+
+
+def definir_configuracao_sons(ativo: bool, volume: float) -> dict[str, Any]:
+    """Persiste earcons ligados/desligados e limita o volume a 50%."""
+    volume_seguro = max(0.0, min(0.5, float(volume)))
+    config = carregar_configuracao()
+    config["sons_interface_ativos"] = bool(ativo)
+    config["volume_sons_interface"] = volume_seguro
+    salvar_configuracao(config)
+    return {"ativo": bool(ativo), "volume": volume_seguro}
 
 
 def obter_voz_para_idioma(idioma: str | None = None) -> str:

@@ -130,6 +130,7 @@ class OuvinteVoz:
         self._limite_silencio_padrao = limite_silencio
         self._ruido_ambiente = 0.004
         self._palavras_ativacao_extras: list[str] = []
+        self._gravando = False
 
         self.ultima_latencia_vad_ms: float = 0.0
         self.ultima_latencia_stt_ms: float = 0.0
@@ -163,6 +164,11 @@ class OuvinteVoz:
     @property
     def sensibilidade(self) -> float:
         return self._limiar_energia
+
+    @property
+    def gravando(self) -> bool:
+        """Indica captura física ativa, inclusive enquanto aguarda o início da fala."""
+        return self._gravando
 
     @sensibilidade.setter
     def sensibilidade(self, valor: float) -> None:
@@ -270,6 +276,7 @@ class OuvinteVoz:
         inicio = time.time()
 
         try:
+            self._gravando = True
             with sd.InputStream(samplerate=TAXA_AMOSTRAGEM, channels=CANAIS, dtype="float32") as stream:
                 while True:
                     if parar_evento and parar_evento.is_set():
@@ -323,6 +330,8 @@ class OuvinteVoz:
             print(f"  [Ouvido] Aviso na captura de áudio: {e}")
             self._notificar({"tipo": "ouvindo", "ativo": False})
             return None
+        finally:
+            self._gravando = False
 
         self._notificar({"tipo": "ouvindo", "ativo": False})
 

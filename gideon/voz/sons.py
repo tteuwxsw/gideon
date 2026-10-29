@@ -37,20 +37,20 @@ def _sintetizar_som(tipo: str) -> np.ndarray:
         return (onda * env).astype(np.float32)
 
     elif tipo == "conclusao":
-        # Confirmação / Sucesso: Cristal C6 (1046.5 Hz) com sobretom C7 (80ms)
-        duracao = 0.08
+        # Confirmação / Sucesso: díade suave E5-B5 (100ms)
+        duracao = 0.10
         t = np.linspace(0, duracao, int(TAXA_AMOSTRAGEM * duracao), endpoint=False)
-        env = np.exp(-t * 35.0).astype(np.float32)  # Decaimento percussivo suave
-        onda = 0.18 * np.sin(2 * np.pi * 1046.5 * t) + 0.06 * np.sin(2 * np.pi * 2093.0 * t)
+        env = np.exp(-t * 28.0).astype(np.float32)
+        onda = 0.14 * np.sin(2 * np.pi * 659.25 * t) + 0.04 * np.sin(2 * np.pi * 987.77 * t)
         return (onda * env).astype(np.float32)
 
     elif tipo == "erro":
-        # Alerta sutil / Falha: Intervalo menor descendente A4 (440 Hz) -> E4 (329.6 Hz) (150ms)
-        duracao = 0.15
+        # Alerta sutil / Falha: tom grave descendente A3 -> D3 (170ms)
+        duracao = 0.17
         t = np.linspace(0, duracao, int(TAXA_AMOSTRAGEM * duracao), endpoint=False)
-        freq = np.linspace(440.0, 329.63, len(t))
+        freq = np.linspace(220.0, 146.83, len(t))
         env = _gerar_envelope_hann(len(t))
-        onda = 0.20 * np.sin(2 * np.pi * freq * t)
+        onda = 0.16 * np.sin(2 * np.pi * freq * t)
         return (onda * env).astype(np.float32)
 
     elif tipo == "pensando":
@@ -101,7 +101,12 @@ def tocar_som(tipo: Literal["ativacao", "conclusao", "erro", "pensando"] | str) 
     def _reproduzir():
         try:
             import sounddevice as sd
-            audio = _obter_array(tipo)
+            from gideon.configuracao import obter_configuracao_sons
+
+            config = obter_configuracao_sons()
+            if not config["ativo"]:
+                return
+            audio = _obter_array(tipo) * float(config["volume"])
             sd.play(audio, samplerate=TAXA_AMOSTRAGEM, blocking=False)
         except Exception:
             # Não interrompe se a máquina não tiver dispositivo de áudio ativo

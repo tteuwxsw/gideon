@@ -14,6 +14,7 @@ from gideon.cerebro import Cerebro
 from gideon.configuracao import (
     definir_interrupcao_voz_ativa,
     definir_modo_personalidade,
+    obter_configuracao_sons,
     obter_interrupcao_voz_ativa,
     obter_modo_personalidade,
 )
@@ -39,7 +40,6 @@ from gideon.voz.fala import SintetizadorVoz
 from gideon.voz.metricas import metricas_voz_global
 from gideon.voz.ouvido import OuvinteVoz
 from gideon.voz.despertador import identificar_saudacao
-from gideon.voz.sons import tocar_som_ativacao, tocar_som_conclusao, tocar_som_erro
 
 
 _PADRAO_TAG_LEGADA = re.compile(r"\[EMOCAO:[^\]]+\]", re.IGNORECASE)
@@ -219,6 +219,13 @@ class OrquestradorVoz:
     def _definir_estado_ia(self, estado: str) -> None:
         self.estado_comportamental_atual = estado
         self._evento_interno({"tipo": "estado_ia", "estado": estado})
+
+    def _emitir_som_interface(self, som: str) -> bool:
+        """Publica earcon somente quando a preferência persistente está ativa."""
+        if not getattr(self, "callback_ws", None) or not obter_configuracao_sons()["ativo"]:
+            return False
+        self._evento_interno({"tipo": "som", "som": som})
+        return True
 
     def iniciar(self) -> None:
         """Inicia a escuta de voz em segundo plano."""
@@ -638,11 +645,7 @@ class OrquestradorVoz:
                 if saudacao_interface:
                     comando = texto.strip()
                 elif tem_wake:
-                    self._evento_interno({"tipo": "som", "som": "ativacao"})
-                    try:
-                        tocar_som_ativacao()
-                    except Exception:
-                        pass
+                    self._emitir_som_interface("ativacao")
                     comando = comando_extraido
                 elif em_janela_continua:
                     prob = avaliar_fala_direcionada(
@@ -681,6 +684,11 @@ class OrquestradorVoz:
                     # 2. Resolução via LLM com Streaming Sentença-por-Sentença para o TTS
                     self._responder_com_llm_streaming(comando)
 
+                if not self.sintetizador.foi_interrompida and self._emitir_som_interface("conclusao"):
+                    # O maior earcon dura 170ms. Esta margem impede que a próxima
+                    # captura do microfone comece enquanto o navegador o reproduz.
+                    self._parar_evento.wait(0.24)
+
                 metricas_voz_global.registrar(
                     modo_escuta=self.modo_escuta.value,
                     origem_resposta=self.ultima_origem_resposta,
@@ -696,9 +704,10 @@ class OrquestradorVoz:
             except Exception as e:
                 print(f"  [Voz] Erro no laço de voz: {e}")
                 self._definir_estado_ia("error")
+                self._emitir_som_interface("erro")
                 # Evita um loop de erro consumir um núcleo inteiro e disputar
                 # tempo de CPU com captura e reprodução de áudio.
-                self._parar_evento.wait(0.2)
+                self._parar_evento.wait(0.24)
 
     def _processar_comando_sistema(self, comando: str) -> str | None:
         """Confirma e executa comandos sensíveis ou alternativas de recuperação de falha."""
