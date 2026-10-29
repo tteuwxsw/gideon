@@ -17,7 +17,7 @@ CONFIG_ARQUIVO = DADOS_DIR / "config.json"
 IDIOMAS_SUPORTADOS = {
     "pt-BR": {
         "nome": "Português (Brasil)",
-        "voz_edge": "pt-BR-ThalitaMultilingualNeural",
+        "voz_edge": "pt-BR-FranciscaNeural",
         "descricao": "Português do Brasil - Tom calmo e elegante",
     },
     "en-US": {

@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useRef } from 'react'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
-import { Sparkles, Bot, User, Cpu } from 'lucide-react'
+import { Bot, User, Cpu } from 'lucide-react'
 import type { Message } from '../types'
 
 interface ChatTimelineProps {
@@ -49,11 +49,10 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
         transition={{ type: 'spring', damping: 30, stiffness: 360 }}
       >
         <div className="eyebrow-chip">
-          <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-          <span>Nucleo de operacoes local</span>
+          <span>Núcleo local disponível</span>
         </div>
         <h2 className="hero-title">
-          Às suas ordens, <span className="font-semibold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500">Senhor Henry</span>.
+          Às suas ordens, <span>Senhor Henry</span>.
         </h2>
         <p className="hero-subtitle">
           Posso operar o computador, telemetria em tempo real, automações e executar ordens verbais com máxima deferência.
@@ -65,17 +64,16 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
             'Qual o consumo de memória e processador?',
             'Como está a previsão do tempo?',
             'Criar lembrete para amanhã cedo',
-            'Status geral do sistema Windows'
-          ].map((sug, i) => (
+            'Status geral do computador'
+          ].map((sug) => (
             <motion.button
-              key={i}
+              key={sug}
               className="prompt-card"
               whileHover={reduceMotion ? undefined : { scale: 1.015 }}
               whileTap={{ scale: 0.98 }}
               transition={{ type: 'spring', damping: 20, stiffness: 400 }}
               onClick={() => onSelectSuggestion?.(sug)}
             >
-              <span className="prompt-index">0{i + 1}</span>
               <span>{sug}</span>
             </motion.button>
           ))}
@@ -129,7 +127,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
               {/* Assistant Message Footnote */}
               {msg.role === 'assistant' && (msg.model || msg.latencyMs) && (
                 <div className="message-meta">
-                  <Cpu className="w-3 h-3 text-cyan-400/80" />
+                  <Cpu className="w-3 h-3" />
                   <span>{msg.model || 'gemini-flash-lite'}</span>
                   {msg.latencyMs && <span>• {Math.round(msg.latencyMs)}ms</span>}
                   {msg.tokens && <span>• {msg.tokens} tokens</span>}

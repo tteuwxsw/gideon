@@ -22,6 +22,8 @@ STOP_EVENT_NAME = "Local\\GideonWakeStop"
 ERROR_ALREADY_EXISTS = 183
 WAIT_OBJECT_0 = 0
 LOG_FILE = DADOS_DIR / "gideon_wake.log"
+LOCK_FILE = DADOS_DIR / "wake.lock"
+STOP_SIGNAL_FILE = DADOS_DIR / "parar_wake.sinal"
 
 
 def _log(mensagem: str) -> None:
@@ -33,7 +35,16 @@ def _log(mensagem: str) -> None:
 
 def _criar_mutex():
     if os.name != "nt":
-        return True
+        import fcntl
+
+        DADOS_DIR.mkdir(parents=True, exist_ok=True)
+        handle = LOCK_FILE.open("a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return None
+        return handle
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateMutexW.restype = wintypes.HANDLE
@@ -47,6 +58,9 @@ def _criar_mutex():
 
 
 def _criar_evento_parada():
+    if os.name != "nt":
+        STOP_SIGNAL_FILE.unlink(missing_ok=True)
+        return STOP_SIGNAL_FILE
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateEventW.restype = wintypes.HANDLE
@@ -58,7 +72,9 @@ def _criar_evento_parada():
 
 def sinalizar_parada_wake() -> bool:
     if os.name != "nt":
-        return False
+        STOP_SIGNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STOP_SIGNAL_FILE.write_text("1", encoding="ascii")
+        return True
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.OpenEventW.restype = wintypes.HANDLE
@@ -83,6 +99,7 @@ def _iniciar_gideon(*argumentos: str) -> None:
         _comando_gideon(*argumentos),
         cwd=INSTALL_DIR if FROZEN else ROOT_DIR,
         creationflags=flags,
+        start_new_session=os.name != "nt",
         close_fds=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -159,6 +176,13 @@ class WakeLauncher:
                 self.parar_evento.wait(10.0)
 
     def _monitorar_parada_externa(self) -> None:
+        if os.name != "nt":
+            while not self.parar_evento.wait(0.5):
+                if self.evento_parada.exists():
+                    self.evento_parada.unlink(missing_ok=True)
+                    self._sair()
+                    return
+            return
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         if kernel32.WaitForSingleObject(self.evento_parada, 0xFFFFFFFF) == WAIT_OBJECT_0:
             self._sair()
@@ -175,8 +199,6 @@ class WakeLauncher:
 
 
 def main() -> int:
-    if os.name != "nt":
-        return 1
     if "--stop" in sys.argv:
         sinalizou = sinalizar_parada_wake()
         sinalizar_parada()
@@ -189,9 +211,13 @@ def main() -> int:
         WakeLauncher(evento_parada, mostrar_icone="--headless" not in sys.argv).executar()
         return 0
     finally:
-        kernel32 = ctypes.WinDLL("kernel32")
-        kernel32.CloseHandle(evento_parada)
-        kernel32.CloseHandle(mutex)
+        if os.name == "nt":
+            kernel32 = ctypes.WinDLL("kernel32")
+            kernel32.CloseHandle(evento_parada)
+            kernel32.CloseHandle(mutex)
+        else:
+            STOP_SIGNAL_FILE.unlink(missing_ok=True)
+            mutex.close()
 
 
 if __name__ == "__main__":

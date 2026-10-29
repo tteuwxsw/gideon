@@ -8,6 +8,7 @@ Nada entra aqui sem passar pelo Henry: a ferramenta que escreve é amarela.
 from __future__ import annotations
 
 import re
+import os
 import threading
 from datetime import datetime
 
@@ -23,7 +24,8 @@ SECOES = (
     "Coisas que o Henry não gosta",
 )
 
-MODELO_INICIAL = """# Perfil vivo do Henry
+SISTEMA_PADRAO = "Windows" if os.name == "nt" else "Zorin OS (Linux)"
+MODELO_INICIAL = f"""# Perfil vivo do Henry
 
 Arquivo local da Gideon. O Henry pode editar ou apagar qualquer linha.
 Cada linha nova traz a data e a origem.
@@ -33,7 +35,7 @@ Cada linha nova traz a data e a origem.
 - Dirigir-se ao Henry sempre como "Senhor", "Senhor Henry" ou "Senhor:".
 
 ## Preferências
-- Usa Windows.
+- Usa {SISTEMA_PADRAO}.
 
 ## Regras aprovadas
 

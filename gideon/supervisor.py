@@ -1,4 +1,4 @@
-"""Gerencia o ciclo de vida da Gideon e a integracao visual com o Windows."""
+"""Gerencia o ciclo de vida da Gideon no Windows e no Linux."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import shutil
 from ctypes import wintypes
 from pathlib import Path
 
@@ -27,6 +28,9 @@ COMPONENT_LOG_FILE = DADOS_DIR / "gideon_background.log"
 MUTEX_NAME = "Local\\GideonSupervisor"
 STOP_EVENT_NAME = "Local\\GideonStop"
 OPEN_EVENT_NAME = "Local\\GideonOpenOrFocus"
+LOCK_FILE = DADOS_DIR / "supervisor.lock"
+STOP_SIGNAL_FILE = DADOS_DIR / "parar.sinal"
+OPEN_SIGNAL_FILE = DADOS_DIR / "abrir.sinal"
 ERROR_ALREADY_EXISTS = 183
 WAIT_OBJECT_0 = 0
 SAIR_REINICIANDO = 20
@@ -52,6 +56,17 @@ def _user32():
 
 
 def _criar_mutex_unico():
+    if os.name != "nt":
+        import fcntl
+
+        DADOS_DIR.mkdir(parents=True, exist_ok=True)
+        handle = LOCK_FILE.open("a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return None
+        return handle
     kernel32 = _kernel32()
     kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateMutexW.restype = wintypes.HANDLE
@@ -65,6 +80,10 @@ def _criar_mutex_unico():
 
 
 def _criar_evento(nome: str, *, manual_reset: bool):
+    if os.name != "nt":
+        caminho = STOP_SIGNAL_FILE if nome == STOP_EVENT_NAME else OPEN_SIGNAL_FILE
+        caminho.unlink(missing_ok=True)
+        return caminho
     kernel32 = _kernel32()
     kernel32.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateEventW.restype = wintypes.HANDLE
@@ -85,9 +104,43 @@ def _criar_evento_abertura():
     return _criar_evento(OPEN_EVENT_NAME, manual_reset=False)
 
 
+def _evento_disparado(evento, timeout_ms: int) -> bool:
+    """Espera um evento Win32 ou um arquivo de sinal no Linux."""
+    if os.name == "nt":
+        return _kernel32().WaitForSingleObject(evento, timeout_ms) == WAIT_OBJECT_0
+    limite = time.monotonic() + (timeout_ms / 1000)
+    while True:
+        if evento.exists():
+            if evento == OPEN_SIGNAL_FILE:
+                try:
+                    dados = json.loads(evento.read_text(encoding="utf-8"))
+                    for nome in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS"):
+                        if dados.get(nome):
+                            os.environ[nome] = str(dados[nome])
+                except (OSError, ValueError):
+                    pass
+            evento.unlink(missing_ok=True)
+            return True
+        if timeout_ms == 0 or time.monotonic() >= limite:
+            return False
+        time.sleep(min(0.05, max(0.0, limite - time.monotonic())))
+
+
 def _sinalizar_evento(nome: str) -> bool:
     if os.name != "nt":
-        return False
+        if not supervisor_ativo():
+            return False
+        DADOS_DIR.mkdir(parents=True, exist_ok=True)
+        caminho = STOP_SIGNAL_FILE if nome == STOP_EVENT_NAME else OPEN_SIGNAL_FILE
+        if nome == OPEN_EVENT_NAME:
+            ambiente = {
+                chave: os.environ.get(chave, "")
+                for chave in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS")
+            }
+            caminho.write_text(json.dumps(ambiente), encoding="utf-8")
+        else:
+            caminho.write_text("1", encoding="ascii")
+        return True
     kernel32 = _kernel32()
     event_modify_state = 0x0002
     kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
@@ -114,7 +167,19 @@ def sinalizar_abertura() -> bool:
 def supervisor_ativo() -> bool:
     """Informa se existe uma instancia dona do evento de parada."""
     if os.name != "nt":
-        return False
+        import fcntl
+
+        try:
+            DADOS_DIR.mkdir(parents=True, exist_ok=True)
+            with LOCK_FILE.open("a+") as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    return False
+                except BlockingIOError:
+                    return True
+        except OSError:
+            return False
     kernel32 = _kernel32()
     synchronize = 0x00100000
     kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
@@ -167,6 +232,11 @@ def _localizar_navegador_app() -> Path | None:
         Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
         local_app_data / "Google" / "Chrome" / "Application" / "chrome.exe",
     ]
+    if os.name != "nt":
+        candidatos = [
+            Path(configurado) if configurado else None,
+            *(Path(p) for nome in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge") if (p := shutil.which(nome))),
+        ]
     return next((candidato for candidato in candidatos if candidato and candidato.is_file()), None)
 
 
@@ -207,6 +277,12 @@ def _pids_do_processo(processo: subprocess.Popen | None) -> set[int]:
 
 
 def _focar_interface(processo: subprocess.Popen | None) -> bool:
+    if os.name != "nt":
+        wmctrl = shutil.which("wmctrl")
+        if not wmctrl:
+            return False
+        resultado = subprocess.run([wmctrl, "-a", "Gideon"], capture_output=True)
+        return resultado.returncode == 0
     user32 = _user32()
     for pid in _pids_do_processo(processo):
         for hwnd in _janelas_do_processo(pid):
@@ -253,10 +329,30 @@ def _abrir_interface(
     return subprocess.Popen(
         _montar_comando_app(navegador, perfil, token_bootstrap),
         cwd=INSTALL_DIR if FROZEN else ROOT_DIR,
-        env=os.environ.copy(),
+        env=_ambiente_grafico(),
         stdout=log_handle,
         stderr=log_handle,
     )
+
+
+def _ambiente_grafico() -> dict[str, str]:
+    """Completa o ambiente gráfico mesmo após reinício do systemd --user."""
+    ambiente = os.environ.copy()
+    if os.name == "nt":
+        return ambiente
+    runtime = Path(f"/run/user/{os.getuid()}")
+    ambiente.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime / 'bus'}")
+    if not ambiente.get("WAYLAND_DISPLAY"):
+        sockets = sorted(runtime.glob("wayland-*"))
+        socket = next((p for p in sockets if not p.name.endswith(".lock")), None)
+        if socket:
+            ambiente["WAYLAND_DISPLAY"] = socket.name
+    ambiente.setdefault("DISPLAY", ":0")
+    if not ambiente.get("XAUTHORITY"):
+        autoridades = sorted(runtime.glob(".mutter-Xwaylandauth.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if autoridades:
+            ambiente["XAUTHORITY"] = str(autoridades[0])
+    return ambiente
 
 
 def _gravar_runtime(backend: subprocess.Popen | None, app_process: subprocess.Popen | None) -> None:
@@ -273,6 +369,8 @@ def _gravar_runtime(backend: subprocess.Popen | None, app_process: subprocess.Po
 
 
 def _janelas_do_processo(pid: int) -> list[int]:
+    if os.name != "nt":
+        return []
     user32 = _user32()
     encontradas: list[int] = []
     callback_tipo = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -290,6 +388,8 @@ def _janelas_do_processo(pid: int) -> list[int]:
 
 
 def _fechar_janelas(pid: int) -> None:
+    if os.name != "nt":
+        return
     user32 = _user32()
     for hwnd in _janelas_do_processo(pid):
         user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
@@ -325,10 +425,6 @@ def _solicitar_parada_backend(token_runtime: str) -> None:
 
 
 def executar(*, abrir_inicialmente: bool = True) -> int:
-    if os.name != "nt":
-        print("O supervisor da Gideon requer Windows.")
-        return 1
-
     mutex = _criar_mutex_unico()
     if mutex is None:
         if abrir_inicialmente:
@@ -336,7 +432,7 @@ def executar(*, abrir_inicialmente: bool = True) -> int:
         _log("Instancia existente sinalizada para abrir ou receber foco.")
         return 0
 
-    kernel32 = _kernel32()
+    kernel32 = _kernel32() if os.name == "nt" else None
     evento_parada = _criar_evento_parada()
     evento_abertura = _criar_evento_abertura()
     token_runtime = secrets.token_urlsafe(32)
@@ -389,7 +485,7 @@ def executar(*, abrir_inicialmente: bool = True) -> int:
 
         componente_falhou = False
         inicio_estavel = time.monotonic()
-        while kernel32.WaitForSingleObject(evento_parada, 500) != WAIT_OBJECT_0:
+        while not _evento_disparado(evento_parada, 500):
             if backend.poll() is not None:
                 componente_falhou = True
                 _log("Backend encerrou inesperadamente; encerrando o aplicativo.")
@@ -398,7 +494,7 @@ def executar(*, abrir_inicialmente: bool = True) -> int:
                 app_process = None
                 _gravar_runtime(backend, app_process)
                 _log("Janela fechada; nucleo e voz continuam ativos em segundo plano.")
-            if kernel32.WaitForSingleObject(evento_abertura, 0) == WAIT_OBJECT_0:
+            if _evento_disparado(evento_abertura, 0):
                 if not _focar_interface(app_process):
                     novo_token = _obter_novo_bootstrap(token_runtime)
                     app_process = _abrir_interface(navegador, perfil_app, novo_token, log_handle)
@@ -492,9 +588,14 @@ def executar(*, abrir_inicialmente: bool = True) -> int:
         RUNTIME_FILE.unlink(missing_ok=True)
         if log_handle:
             log_handle.close()
-        kernel32.CloseHandle(evento_parada)
-        kernel32.CloseHandle(evento_abertura)
-        kernel32.CloseHandle(mutex)
+        if os.name == "nt":
+            kernel32.CloseHandle(evento_parada)
+            kernel32.CloseHandle(evento_abertura)
+            kernel32.CloseHandle(mutex)
+        else:
+            STOP_SIGNAL_FILE.unlink(missing_ok=True)
+            OPEN_SIGNAL_FILE.unlink(missing_ok=True)
+            mutex.close()
 
 
 def main() -> int:
@@ -513,6 +614,11 @@ def main() -> int:
     abrir_inicialmente = "--background" not in sys.argv
     resultado = executar(abrir_inicialmente=abrir_inicialmente)
     if resultado in {SAIR_REINICIANDO, SAIR_BACKEND_FALHOU}:
+        # Sob systemd o processo não deve criar um filho órfão: um código de
+        # falha pede ao próprio gerenciador que reinicie a unidade e continue
+        # acompanhando o PID correto.
+        if os.environ.get("GIDEON_MANAGED_BY_SYSTEMD") == "1":
+            return 75 if resultado == SAIR_REINICIANDO else 1
         reinicios = int(os.environ.get("GIDEON_RESTART_COUNT", "0"))
         if resultado == SAIR_BACKEND_FALHOU and reinicios >= 3:
             _log("Backend falhou repetidamente; reinicio automatico suspenso.")
@@ -530,6 +636,7 @@ def main() -> int:
             cwd=INSTALL_DIR if FROZEN else ROOT_DIR,
             env=ambiente,
             creationflags=flags,
+            start_new_session=os.name != "nt",
             close_fds=True,
         )
         return 0

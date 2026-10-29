@@ -147,7 +147,7 @@ def test_fala_direcionada_sem_wake_word():
 def test_30_interacoes_consistencia_voz_e_latencia():
     print("[5/7] Executando 30 interações consecutivas (Consistência Vocal + Latência p50/p95)...")
     sintetizador = SintetizadorVoz(pre_aquecer=False)
-    assert sintetizador.voz_id == IDENTIFICADOR_VOZ_FIXA == "pt-BR-ThalitaMultilingualNeural"
+    assert sintetizador.voz_id == IDENTIFICADOR_VOZ_FIXA == "pt-BR-FranciscaNeural"
     sintetizador._gerar_audio_voz_fixa = lambda _texto: (
         np.full(2400, 0.02, dtype=np.float32),
         24000,
@@ -252,7 +252,7 @@ def test_30_interacoes_consistencia_voz_e_latencia():
 
     resumo = metricas_voz_global.resumo_estatistico()
     assert resumo["voz_fixa_unica"] is True, f"Voz mudou! Vozes vistas: {resumo['vozes_vistas']}"
-    assert vozes_usadas == {"pt-BR-ThalitaMultilingualNeural"}
+    assert vozes_usadas == {"pt-BR-FranciscaNeural"}
     print(f"  -> 30/30 interações com 100% de consistência vocal ({sintetizador.voz_id})!")
     print(f"  -> Latência NLU p50: {resumo['p50_ms']['nlu_ms']} ms | p95: {resumo['p95_ms']['nlu_ms']} ms")
     print(f"  -> Latência TTS (com cache) p50: {resumo['p50_ms']['tts_ttfa_ms']} ms | p95: {resumo['p95_ms']['tts_ttfa_ms']} ms")
@@ -307,7 +307,7 @@ async def test_api_modos_e_metricas():
         dados_voz = res.json()
         assert dados_voz["inicializacao"] in {"nao_iniciada", "inicializando", "pronta"}
         if dados_voz["inicializacao"] == "pronta":
-            assert dados_voz["voz_fixa_id"] == "pt-BR-ThalitaMultilingualNeural"
+            assert dados_voz["voz_fixa_id"] == "pt-BR-FranciscaNeural"
 
         res_m = await client.get("/api/voz/metricas", headers=headers)
         assert res_m.status_code == 200

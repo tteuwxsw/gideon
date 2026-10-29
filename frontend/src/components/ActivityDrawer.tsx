@@ -102,7 +102,7 @@ const describeResult = (activity: ActivityItem) => {
           >
             <div className="sheet-header">
               <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-cyan-400" />
+                <Activity className="w-4 h-4 text-slate-400" />
                 <h3 className="text-sm font-medium">Atividades da Sessão</h3>
               </div>
               <button onClick={() => closeRef.current()} className="sheet-close" aria-label="Fechar atividades">
@@ -118,9 +118,9 @@ const describeResult = (activity: ActivityItem) => {
               ) : (
                 activities.map((act) => (
                   <article key={act.id_acao} className="activity-card">
-                    <div className="flex items-center justify-between text-xs font-mono text-cyan-300">
+                    <div className="flex items-center justify-between text-xs font-mono text-slate-300">
                       <span className="flex items-center gap-1.5">
-                        <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                        <Terminal className="w-3.5 h-3.5 text-slate-500" />
                         {act.ferramenta || 'Ação'}
                       </span>
                       <time className="activity-time" dateTime={act.timestamp}>{formatTimestamp(act.timestamp)}</time>

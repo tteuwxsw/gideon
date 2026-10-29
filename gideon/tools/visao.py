@@ -15,7 +15,7 @@ from pathlib import Path
 import time
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageGrab
 
 from gideon.caminhos import DADOS_DIR
 from gideon.gate import Ferramenta, Risco
@@ -42,6 +42,8 @@ class BITMAPINFOHEADER(ctypes.Structure):
 
 def capturar_tela_imagem() -> Image.Image:
     """Captura a tela inteira via Win32 BitBlt com velocidade ultrarrápida (0-2ms)."""
+    if os.name != "nt":
+        return ImageGrab.grab(all_screens=True).convert("RGB")
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
 

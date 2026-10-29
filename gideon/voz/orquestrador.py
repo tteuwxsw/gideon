@@ -500,10 +500,11 @@ class OrquestradorVoz:
 
                     while True:
                         m = re.search(r"^(.+?[.!?…])\s+(.*)$", buffer_atual, re.DOTALL)
-                        if not m:
+                        if m:
+                            sentenca_pronta = m.group(1).strip()
+                            buffer_atual = m.group(2)
+                        else:
                             break
-                        sentenca_pronta = m.group(1).strip()
-                        buffer_atual = m.group(2)
                         if sentenca_pronta:
                             yield sentenca_pronta
 
@@ -628,7 +629,9 @@ class OrquestradorVoz:
             except Exception as e:
                 print(f"  [Voz] Erro no laço de voz: {e}")
                 self._definir_estado_ia("error")
-                pass  # TURBO: sleep removido
+                # Evita um loop de erro consumir um núcleo inteiro e disputar
+                # tempo de CPU com captura e reprodução de áudio.
+                self._parar_evento.wait(0.2)
 
     def _processar_comando_sistema(self, comando: str) -> str | None:
         """Confirma e executa comandos sensíveis ou alternativas de recuperação de falha."""

@@ -50,35 +50,43 @@ def _atualizar_gpu_background() -> None:
     global _CACHE_GPU, _CACHE_GPU_TS, _ATUALIZANDO_GPU
     try:
         gpus = []
-        comando = (
-            "Get-CimInstance Win32_VideoController | "
-            "Select-Object Name, AdapterRAM, DriverVersion, Status | "
-            "ConvertTo-Json -Compress"
-        )
-        res = subprocess.run(
-            [comando_powershell(), "-NoProfile", "-NonInteractive", "-Command", comando],
-            capture_output=True,
-            text=True,
-            timeout=3.5,
-            **opcoes_processo_oculto(),
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            dados = json.loads(res.stdout.strip())
-            if isinstance(dados, dict):
-                dados = [dados]
-            for item in dados:
-                nome = str(item.get("Name") or "Adaptador de vídeo").strip()
-                ram_bytes = item.get("AdapterRAM") or 0
-                if ram_bytes > 0:
-                    vram_gb = f"{max(1, round(ram_bytes / (1024**3)))} GB"
-                else:
-                    vram_gb = "Não informado"
-                gpus.append({
-                    "modelo": nome,
-                    "vram_total": vram_gb,
-                    "driver": str(item.get("DriverVersion") or ""),
-                    "status": str(item.get("Status") or "OK"),
-                })
+        if os.name != "nt":
+            nvidia_smi = shutil.which("nvidia-smi")
+            if nvidia_smi:
+                res = subprocess.run(
+                    [nvidia_smi, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=3.5,
+                )
+                for linha in res.stdout.splitlines():
+                    partes = [p.strip() for p in linha.split(",")]
+                    if len(partes) >= 3:
+                        gpus.append({"modelo": partes[0], "vram_total": f"{partes[1]} MB", "driver": partes[2], "status": "OK"})
+            else:
+                lspci = shutil.which("lspci")
+                if lspci:
+                    res = subprocess.run([lspci], capture_output=True, text=True, timeout=3.5)
+                    for linha in res.stdout.splitlines():
+                        if "VGA compatible controller" in linha or "3D controller" in linha:
+                            gpus.append({"modelo": linha.split(": ", 1)[-1], "vram_total": "Não informado", "driver": "", "status": "OK"})
+        else:
+            comando = (
+                "Get-CimInstance Win32_VideoController | "
+                "Select-Object Name, AdapterRAM, DriverVersion, Status | "
+                "ConvertTo-Json -Compress"
+            )
+            res = subprocess.run(
+                [comando_powershell(), "-NoProfile", "-NonInteractive", "-Command", comando],
+                capture_output=True, text=True, timeout=3.5, **opcoes_processo_oculto(),
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                dados = json.loads(res.stdout.strip())
+                if isinstance(dados, dict):
+                    dados = [dados]
+                for item in dados:
+                    nome = str(item.get("Name") or "Adaptador de vídeo").strip()
+                    ram_bytes = item.get("AdapterRAM") or 0
+                    vram_gb = f"{max(1, round(ram_bytes / (1024**3)))} GB" if ram_bytes > 0 else "Não informado"
+                    gpus.append({"modelo": nome, "vram_total": vram_gb, "driver": str(item.get("DriverVersion") or ""), "status": str(item.get("Status") or "OK")})
         if gpus:
             principal = gpus[0]
             _CACHE_GPU = {
@@ -116,7 +124,7 @@ def obter_status_pc() -> dict[str, Any]:
     """Coleta métricas em tempo real (< 2ms) de CPU, memória RAM, GPU, disco e tempo ligado."""
     cpu = psutil.cpu_percent(interval=None)
     mem = psutil.virtual_memory()
-    disco = psutil.disk_usage("C:")
+    disco = psutil.disk_usage("C:\\" if os.name == "nt" else "/")
 
     uptime_segundos = int(time.time() - psutil.boot_time())
     horas = uptime_segundos // 3600
@@ -180,7 +188,22 @@ WM_CLOSE = 0x0010
 def listar_janelas_visiveis() -> list[dict[str, Any]]:
     """Enumera todas as janelas visíveis com título no Windows 10 via Win32 API."""
     if os.name != "nt":
-        return []
+        wmctrl = shutil.which("wmctrl")
+        if not wmctrl:
+            return []
+        resultado = subprocess.run([wmctrl, "-lp"], capture_output=True, text=True)
+        janelas = []
+        for linha in resultado.stdout.splitlines():
+            partes = linha.split(None, 4)
+            if len(partes) != 5:
+                continue
+            try:
+                pid = int(partes[2])
+                processo = psutil.Process(pid).name() if pid else ""
+            except (ValueError, psutil.Error):
+                pid, processo = 0, ""
+            janelas.append({"hwnd": partes[0], "pid": pid, "processo": processo, "titulo": partes[4], "minimizada": False, "maximizada": False, "ativa": False})
+        return janelas
 
     user32 = ctypes.windll.user32
     hwnd_ativo = user32.GetForegroundWindow()
@@ -367,6 +390,25 @@ CATALOGO_APPS_WINDOWS: dict[str, dict[str, Any]] = {
     },
 }
 
+# Mantém as mesmas intenções de voz, trocando apenas executáveis e processos
+# quando a Gideon está no Zorin/Ubuntu.
+if os.name != "nt":
+    CATALOGO_APPS_WINDOWS.update({
+        "chrome": {"nome_exibicao": "Google Chrome", "executaveis": ["google-chrome", "chromium", "chromium-browser"], "processos": ["chrome", "google-chrome", "chromium"], "palavras_titulo": ["chrome", "chromium"], "caminhos_extras": []},
+        "edge": {"nome_exibicao": "Microsoft Edge", "executaveis": ["microsoft-edge"], "processos": ["msedge", "microsoft-edge"], "palavras_titulo": ["edge"], "caminhos_extras": []},
+        "spotify": {"nome_exibicao": "Spotify", "executaveis": ["spotify"], "processos": ["spotify"], "palavras_titulo": ["spotify"], "caminhos_extras": [], "fallback_web": "https://open.spotify.com"},
+        "discord": {"nome_exibicao": "Discord", "executaveis": ["discord"], "processos": ["discord"], "palavras_titulo": ["discord"], "caminhos_extras": [], "fallback_web": "https://discord.com/app"},
+        "vscode": {"nome_exibicao": "Visual Studio Code", "executaveis": ["code"], "processos": ["code"], "palavras_titulo": ["visual studio code"], "caminhos_extras": []},
+        "calculadora": {"nome_exibicao": "Calculadora", "executaveis": ["gnome-calculator"], "processos": ["gnome-calculator"], "palavras_titulo": ["calculadora", "calculator"], "caminhos_extras": []},
+        "bloco de notas": {"nome_exibicao": "Editor de Texto", "executaveis": ["gedit", "gnome-text-editor", "xed"], "processos": ["gedit", "gnome-text-editor", "xed"], "palavras_titulo": ["editor de texto", "text editor"], "caminhos_extras": []},
+        "explorador de arquivos": {"nome_exibicao": "Arquivos", "executaveis": ["nautilus", "nemo"], "processos": ["nautilus", "nemo"], "palavras_titulo": ["arquivos", "files", "home"], "caminhos_extras": []},
+        "gerenciador de tarefas": {"nome_exibicao": "Monitor do Sistema", "executaveis": ["gnome-system-monitor"], "processos": ["gnome-system-monitor"], "palavras_titulo": ["monitor do sistema", "system monitor"], "caminhos_extras": []},
+        "terminal": {"nome_exibicao": "Terminal", "executaveis": ["gnome-terminal", "kgx", "x-terminal-emulator"], "processos": ["gnome-terminal", "kgx"], "palavras_titulo": ["terminal"], "caminhos_extras": []},
+        "cmd": {"nome_exibicao": "Terminal", "executaveis": ["gnome-terminal", "kgx", "x-terminal-emulator"], "processos": ["gnome-terminal", "kgx"], "palavras_titulo": ["terminal"], "caminhos_extras": []},
+        "paint": {"nome_exibicao": "Desenho", "executaveis": ["drawing", "pinta"], "processos": ["drawing", "pinta"], "palavras_titulo": ["drawing", "pinta"], "caminhos_extras": []},
+        "steam": {"nome_exibicao": "Steam", "executaveis": ["steam"], "processos": ["steam"], "palavras_titulo": ["steam"], "caminhos_extras": [], "fallback_web": "https://store.steampowered.com"},
+    })
+
 SINONIMOS_APPS: dict[str, str] = {
     "google chrome": "chrome",
     "navegador": "chrome",
@@ -528,6 +570,12 @@ def abrir_programa(nome: str) -> dict[str, Any]:
     # 2. Configurações do Windows ou Painel de Controle
     if chave in {"configuracoes", "configurações", "ms-settings:"}:
         try:
+            if os.name != "nt":
+                configuracoes = shutil.which("gnome-control-center")
+                if not configuracoes:
+                    raise FileNotFoundError("gnome-control-center não encontrado")
+                subprocess.Popen([configuracoes], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return {"sucesso": True, "verificado": True, "evidencias": {"executavel": configuracoes}, "mensagem_humana": "Pronto, Configurações do sistema abertas."}
             if hasattr(os, "startfile"):
                 os.startfile("ms-settings:")
                 time.sleep(0.35)
@@ -670,7 +718,7 @@ def _abrir_url_verificada(url: str, nome_exibicao: str) -> dict[str, Any]:
         }
 
     evidencia = _verificar_processo_ou_janela(
-        nomes_processos=["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"],
+        nomes_processos=["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe", "chrome", "google-chrome", "chromium", "firefox"],
         palavras_titulo=["chrome", "edge", "google", "youtube", nome_exibicao.lower()],
         pids_anteriores=pids_antes,
         timeout_s=2.0,
@@ -768,7 +816,28 @@ def fechar_programa(nome: str) -> dict[str, Any]:
 def gerenciar_janela(acao: str, alvo: str = "") -> dict[str, Any]:
     """Minimiza, maximiza, restaura ou alterna foco para uma janela do Windows e VERIFICA o estado final."""
     if os.name != "nt":
-        return {"sucesso": False, "verificado": False, "erro": "Disponível apenas no Windows."}
+        wmctrl = shutil.which("wmctrl")
+        if not wmctrl:
+            return {"sucesso": False, "verificado": False, "erro": "Instale o pacote wmctrl para controlar janelas no Linux."}
+        janelas = listar_janelas_visiveis()
+        alvo_norm = alvo.strip().lower()
+        janela = next((j for j in janelas if alvo_norm and alvo_norm in j["titulo"].lower()), janelas[0] if janelas else None)
+        if not janela:
+            return {"sucesso": False, "verificado": False, "erro": "Nenhuma janela visível encontrada."}
+        acao_norm = acao.lower().strip()
+        comandos = {
+            "minimizar": ["-b", "add,hidden"], "minimize": ["-b", "add,hidden"],
+            "maximizar": ["-b", "add,maximized_vert,maximized_horz"], "maximize": ["-b", "add,maximized_vert,maximized_horz"],
+            "restaurar": ["-b", "remove,hidden,maximized_vert,maximized_horz"], "restore": ["-b", "remove,hidden,maximized_vert,maximized_horz"],
+            "focar": ["-a", janela["titulo"]], "alternar": ["-a", janela["titulo"]], "ativar": ["-a", janela["titulo"]],
+        }
+        argumentos = comandos.get(acao_norm)
+        if not argumentos:
+            return {"sucesso": False, "verificado": False, "erro": f"Ação de janela '{acao}' não suportada."}
+        comando = [wmctrl, "-ir", str(janela["hwnd"]), *argumentos] if argumentos[0] == "-b" else [wmctrl, *argumentos]
+        resultado = subprocess.run(comando, capture_output=True, text=True)
+        sucesso = resultado.returncode == 0
+        return {"sucesso": sucesso, "verificado": sucesso, "evidencias": {"hwnd": janela["hwnd"], "titulo_janela": janela["titulo"]}, "mensagem_humana": f"Pronto, ação aplicada à janela '{janela['titulo']}'."}
 
     user32 = ctypes.windll.user32
     acao_norm = acao.lower().strip()
@@ -990,6 +1059,17 @@ def controlar_midia(acao: str) -> dict[str, Any]:
             for _ in range(repeticoes):
                 user32.keybd_event(vk_code, 0, 0, 0)
                 user32.keybd_event(vk_code, 0, 2, 0)
+        else:
+            from gideon.tools.janelas import controlar_som_sistema
+            mapa_linux = {
+                "pausar": "play_pause", "continuar": "play_pause", "play": "play_pause", "pause": "play_pause",
+                "proxima": "proxima", "próxima": "proxima", "pular": "proxima", "anterior": "anterior", "voltar": "anterior",
+                "mudo": "mutar", "silenciar": "mutar", "aumentar_volume": "aumentar", "subir_volume": "aumentar",
+                "diminuir_volume": "diminuir", "abaixar_volume": "diminuir",
+            }
+            resultado = controlar_som_sistema(mapa_linux[acao_norm], toques=5)
+            if not resultado.get("sucesso"):
+                return {"sucesso": False, "verificado": False, "erro": resultado.get("erro", "Falha no controle de mídia."), "mensagem_humana": resultado.get("mensagem_humana", "Não consegui controlar a mídia.")}
         return {
             "sucesso": True,
             "verificado": True,
@@ -1070,7 +1150,19 @@ def _enviar_caractere_unicode_win32(ch: str) -> None:
 def digitar_texto(texto: str, janela_alvo: str = "", pressionar_enter: bool = False) -> dict[str, Any]:
     """Digita um texto no campo selecionado da janela ativa (ou foca `janela_alvo` antes) e verifica."""
     if os.name != "nt":
-        return {"sucesso": False, "verificado": False, "erro": "Disponível apenas no Windows."}
+        xdotool = shutil.which("xdotool")
+        if not xdotool:
+            return {"sucesso": False, "verificado": False, "erro": "Instale xdotool para digitar automaticamente no Linux."}
+        if janela_alvo.strip():
+            foco = gerenciar_janela("focar", janela_alvo)
+            if not foco.get("sucesso"):
+                return foco
+        comando = [xdotool, "type", "--clearmodifiers", "--delay", "8", texto]
+        resultado = subprocess.run(comando, capture_output=True, text=True)
+        if resultado.returncode == 0 and pressionar_enter:
+            resultado = subprocess.run([xdotool, "key", "Return"], capture_output=True, text=True)
+        sucesso = resultado.returncode == 0
+        return {"sucesso": sucesso, "verificado": sucesso, "evidencias": {"caracteres_enviados": len(texto), "pressionou_enter": pressionar_enter}, "erro": resultado.stderr.strip() if not sucesso else "", "mensagem_humana": "Pronto, digitei o texto na janela ativa." if sucesso else "Não consegui digitar o texto."}
 
     if not texto:
         return {
@@ -1137,7 +1229,17 @@ def digitar_texto(texto: str, janela_alvo: str = "", pressionar_enter: bool = Fa
 def executar_atalho_teclado(atalho: str, janela_alvo: str = "") -> dict[str, Any]:
     """Executa um atalho de teclado (ex: 'ctrl+s', 'ctrl+c', 'ctrl+v', 'alt+tab', 'enter') e verifica."""
     if os.name != "nt":
-        return {"sucesso": False, "verificado": False, "erro": "Disponível apenas no Windows."}
+        xdotool = shutil.which("xdotool")
+        if not xdotool:
+            return {"sucesso": False, "verificado": False, "erro": "Instale xdotool para executar atalhos no Linux."}
+        if janela_alvo.strip():
+            foco = gerenciar_janela("focar", janela_alvo)
+            if not foco.get("sucesso"):
+                return foco
+        tecla = atalho.replace("+", "+").replace("win", "super").replace("windows", "super")
+        resultado = subprocess.run([xdotool, "key", "--clearmodifiers", tecla], capture_output=True, text=True)
+        sucesso = resultado.returncode == 0
+        return {"sucesso": sucesso, "verificado": sucesso, "evidencias": {"atalho": atalho}, "erro": resultado.stderr.strip() if not sucesso else "", "mensagem_humana": f"Pronto, atalho {atalho.upper()} executado." if sucesso else f"Não consegui executar o atalho '{atalho}'."}
 
     if janela_alvo.strip():
         res_foco = gerenciar_janela("focar", janela_alvo)
@@ -1205,7 +1307,17 @@ def clicar_mouse(
 ) -> dict[str, Any]:
     """Realiza um clique real de mouse nas coordenadas indicadas (ou na posição atual) e verifica a posição."""
     if os.name != "nt":
-        return {"sucesso": False, "verificado": False, "erro": "Disponível apenas no Windows."}
+        xdotool = shutil.which("xdotool")
+        if not xdotool:
+            return {"sucesso": False, "verificado": False, "erro": "Instale xdotool para controlar o mouse no Linux."}
+        comando = [xdotool]
+        if x is not None and y is not None:
+            comando.extend(["mousemove", str(int(x)), str(int(y))])
+        botao_num = "3" if botao.lower().strip() in {"direito", "right"} else "1"
+        comando.extend(["click", "--repeat", "2" if duplo else "1", botao_num])
+        resultado = subprocess.run(comando, capture_output=True, text=True)
+        sucesso = resultado.returncode == 0
+        return {"sucesso": sucesso, "verificado": sucesso, "evidencias": {"x": x, "y": y, "botao": botao, "duplo": duplo}, "erro": resultado.stderr.strip() if not sucesso else "", "mensagem_humana": "Pronto, clique realizado." if sucesso else "Não consegui realizar o clique."}
 
     user32 = ctypes.windll.user32
     if x is not None and y is not None:
@@ -1242,8 +1354,9 @@ def clicar_mouse(
 
 
 def bloquear_estacao() -> dict[str, Any]:
-    """Bloqueia a tela do Windows imediatamente (LockWorkStation)."""
-    res = subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"])
+    """Bloqueia a tela do sistema imediatamente."""
+    comando = ["rundll32.exe", "user32.dll,LockWorkStation"] if os.name == "nt" else ["loginctl", "lock-session"]
+    res = subprocess.run(comando)
     ok = res.returncode == 0
     return {
         "sucesso": ok,

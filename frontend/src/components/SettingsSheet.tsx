@@ -1,8 +1,9 @@
 ﻿import React, { useState, useEffect } from 'react'
 import { useRef } from 'react'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
-import { X, Globe, Radio, AlertOctagon, RefreshCw, Trash2, Check } from 'lucide-react'
+import { X, Globe, Radio, AlertOctagon, RefreshCw, Trash2, Check, KeyRound } from 'lucide-react'
 import type { IdiomaOpcao, ModoEscuta } from '../types'
+import { apiError, apiFetch } from '../api'
 
 interface SettingsSheetProps {
   isOpen: boolean
@@ -30,6 +31,9 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
   const [, setLanguages] = useState<IdiomaOpcao[]>([])
   const [savingLang, setSavingLang] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [geminiConfigured, setGeminiConfigured] = useState(false)
+  const [geminiKey, setGeminiKey] = useState('')
+  const [savingGemini, setSavingGemini] = useState(false)
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef(onClose)
   const noticeTimerRef = useRef<number | undefined>(undefined)
@@ -42,12 +46,17 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      fetch('/api/idioma')
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.idiomas) setLanguages(data.idiomas)
-        })
-        .catch(() => {})
+      Promise.all([apiFetch('/api/idioma'), apiFetch('/api/gemini/status')])
+        .then(async ([languageResponse, geminiResponse]) => {
+          if (languageResponse.ok) {
+            const data = await languageResponse.json()
+            if (data.idiomas) setLanguages(data.idiomas)
+          }
+          if (geminiResponse.ok) {
+            const data = await geminiResponse.json()
+            setGeminiConfigured(Boolean(data.configurada))
+          }
+        }).catch(() => {})
     }
   }, [isOpen])
 
@@ -110,6 +119,26 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
     setSavingLang(false)
   }
 
+  const saveGeminiKey = async () => {
+    if (!geminiKey.trim()) return
+    setSavingGemini(true)
+    try {
+      const response = await apiFetch('/api/gemini/chave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chave: geminiKey.trim() })
+      })
+      if (!response.ok) throw new Error(await apiError(response))
+      setGeminiConfigured(true)
+      setGeminiKey('')
+      notify('Gemini conectado e chave guardada no cofre do sistema.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Não foi possível validar a chave do Gemini.')
+    } finally {
+      setSavingGemini(false)
+    }
+  }
+
   useEffect(() => () => window.clearTimeout(noticeTimerRef.current), [])
 
   const panelInitial = reduceMotion
@@ -160,7 +189,7 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
                 animate={{ opacity: 1, y: 0 }}
                 role="status"
                 aria-live="polite"
-                className="mt-3 py-1.5 px-3 rounded-xl bg-cyan-500/20 text-cyan-300 text-xs text-center border border-cyan-500/30"
+                className="settings-notice"
               >
                 {notice}
               </motion.div>
@@ -169,8 +198,8 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
             <div className="settings-content">
               {/* Idioma Selector */}
               <div>
-                <label className="flex items-center gap-2 text-xs font-medium text-slate-300 mb-2">
-                  <Globe className="w-4 h-4 text-cyan-400" />
+                <label className="setting-label">
+                  <Globe className="w-4 h-4" />
                   <span>Idioma da Gideon</span>
                 </label>
                 <div className="setting-grid" role="group" aria-label="Idioma da Gideon">
@@ -185,15 +214,11 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
                       aria-pressed={currentLanguage === item.cod}
                       onClick={() => handleLang(item.cod)}
                       disabled={savingLang}
-                      className={`py-2 px-3 rounded-xl text-left border transition-all ${
-                        currentLanguage === item.cod
-                          ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200 shadow-[0_0_12px_rgba(0,243,255,0.25)]'
-                          : 'border-white/10 hover:border-white/20 bg-white/5 text-slate-300'
-                      }`}
+                      className={`setting-option ${currentLanguage === item.cod ? 'selected' : ''}`}
                     >
                       <div className="font-medium text-xs flex items-center justify-between">
                         <span>{item.label}</span>
-                        {currentLanguage === item.cod && <Check className="w-3.5 h-3.5 text-cyan-400" />}
+                        {currentLanguage === item.cod && <Check className="w-3.5 h-3.5" />}
                       </div>
                       <div className="text-[10px] text-slate-400">{item.sub}</div>
                     </button>
@@ -203,8 +228,8 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
 
               {/* Modo de Escuta */}
               <div>
-                <label className="flex items-center gap-2 text-xs font-medium text-slate-300 mb-2">
-                  <Radio className="w-4 h-4 text-cyan-400" />
+                <label className="setting-label">
+                  <Radio className="w-4 h-4" />
                   <span>Modo de Escuta Inteligente</span>
                 </label>
                 <div className="setting-grid" role="group" aria-label="Modo de escuta">
@@ -221,16 +246,39 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
                         () => onChangeVoiceMode(m.mode as ModoEscuta),
                         'Modo de escuta atualizado.'
                       )}
-                      className={`py-2 px-3 rounded-xl text-left border transition-all ${
-                        currentVoiceMode === m.mode
-                          ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200'
-                          : 'border-white/10 hover:border-white/20 bg-white/5 text-slate-300'
-                      }`}
+                      className={`setting-option ${currentVoiceMode === m.mode ? 'selected' : ''}`}
                     >
                       <div className="font-medium text-xs">{m.label}</div>
                       <div className="text-[10px] text-slate-400">{m.desc}</div>
                     </button>
                   ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="setting-label" htmlFor="gemini-api-key">
+                  <KeyRound className="w-4 h-4" />
+                  <span>Google Gemini</span>
+                  <span className={`integration-status ${geminiConfigured ? 'connected' : ''}`}>
+                    {geminiConfigured ? 'Conectado' : 'Não configurado'}
+                  </span>
+                </label>
+                <p className="setting-help">
+                  A chave fica no cofre do sistema e nunca é gravada no código ou exibida novamente.
+                </p>
+                <div className="api-key-row">
+                  <input
+                    id="gemini-api-key"
+                    type="password"
+                    value={geminiKey}
+                    onChange={(event) => setGeminiKey(event.target.value)}
+                    placeholder={geminiConfigured ? 'Substituir chave atual' : 'Cole sua chave da API'}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button type="button" onClick={saveGeminiKey} disabled={!geminiKey.trim() || savingGemini}>
+                    {savingGemini ? 'Validando…' : 'Salvar'}
+                  </button>
                 </div>
               </div>
 
@@ -241,7 +289,7 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
                     await onClearChat()
                     notify('Conversa reiniciada com sucesso.')
                   }}
-                  className="w-full py-2.5 px-4 rounded-xl text-xs font-medium bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 flex items-center justify-center gap-2 transition-colors"
+                  className="system-action"
                 >
                   <Trash2 className="w-4 h-4 text-slate-400" />
                   <span>Limpar conversa atual</span>
@@ -253,7 +301,7 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
                       await onEmergencyStop()
                       notify('Parada de emergência ativada.')
                     }}
-                    className="py-2.5 px-3 rounded-xl text-xs font-medium bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 flex items-center justify-center gap-1.5 transition-colors"
+                    className="system-action danger"
                   >
                     <AlertOctagon className="w-4 h-4 text-red-400" />
                     <span>Parada de Emergência</span>
@@ -264,7 +312,7 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
                       await onEmergencyResume()
                       notify('Ferramentas liberadas novamente.')
                     }}
-                    className="py-2.5 px-3 rounded-xl text-xs font-medium bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 flex items-center justify-center gap-1.5 transition-colors"
+                    className="system-action positive"
                   >
                     <RefreshCw className="w-4 h-4 text-emerald-400" />
                     <span>Retomar Ferramentas</span>

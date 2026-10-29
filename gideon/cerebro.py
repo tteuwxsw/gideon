@@ -1,6 +1,7 @@
 """Conector do cérebro da Gideon com suporte a streaming, Function Calling e custos."""
 
 from typing import Generator, Any
+import os
 import re
 import keyring
 from google import genai
@@ -18,8 +19,8 @@ MODELO_PRINCIPAL = "gemini-flash-lite-latest"
 MODELOS_CASCATA = (
     "gemini-flash-lite-latest",
     "gemini-3.5-flash-lite",
-    "gemini-flash-latest",
     "gemini-3-flash-preview",
+    "gemini-flash-latest",
     "gemini-3.6-flash",
     "gemini-3.1-flash-lite",
 )
@@ -38,6 +39,9 @@ _CONTA_COFRE = "gemini_api_key"
 
 def _obter_chave_cofre() -> str:
     """Busca a chave da API no cofre, com fallback para o nome antigo."""
+    chave_ambiente = os.environ.get("GEMINI_API_KEY", "").strip()
+    if chave_ambiente:
+        return chave_ambiente
     chave = keyring.get_password(_SERVICO_COFRE, _CONTA_COFRE)
     if chave:
         return chave
@@ -153,15 +157,17 @@ class Cerebro:
         budget_thinking = self._orcamento_raciocinio(mensagens)
         ferramentas_gemini = _obter_ferramentas_gemini() if usar_ferramentas else None
 
+        # Os aliases Flash Lite respondem rapidamente, mas rejeitam
+        # `thinking_budget=0`. Ausente já significa resposta direta.
         thinking_cfg = (
             types.ThinkingConfig(thinking_budget=budget_thinking)
             if (budget_thinking > 0 and not usar_ferramentas)
-            else types.ThinkingConfig(thinking_budget=0)
+            else None
         )
 
         config = types.GenerateContentConfig(
             system_instruction=prompt_sistema,
-            temperature=0.9,  # TURBO: resposta instantânea  # PATCH: resposta mais rápida
+            temperature=0.65,
             thinking_config=thinking_cfg,
             tools=ferramentas_gemini if ferramentas_gemini else None,
         )

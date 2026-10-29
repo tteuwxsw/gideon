@@ -1,4 +1,4 @@
-"""Gideon - assistente pessoal local para Windows."""
+"""Gideon - assistente pessoal local para Windows e Linux."""
 
 from gideon.versao import VERSAO
 

@@ -13,6 +13,10 @@ ROOT_DIR = RESOURCE_DIR
 
 if os.environ.get("GIDEON_DATA_DIR"):
     DADOS_DIR = Path(os.environ["GIDEON_DATA_DIR"])
+elif os.name != "nt":
+    # No Linux, desenvolvimento, CLI e serviço systemd precisam compartilhar
+    # exatamente o mesmo runtime. Isso também segue o padrão XDG do sistema.
+    DADOS_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "gideon"
 elif FROZEN:
     DADOS_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Gideon" / "dados"
 else:

@@ -16,6 +16,8 @@ from pydantic import BaseModel
 import uvicorn
 import json
 import asyncio
+import keyring
+from google import genai
 
 from gideon.cerebro import Cerebro
 from gideon.auth import obter_ou_criar_token, token_valido
@@ -139,6 +141,10 @@ class MensagemRequisicao(BaseModel):
     mensagem: str
 
 
+class GeminiChaveRequisicao(BaseModel):
+    chave: str
+
+
 # ─── Rotas HTTP ───────────────────────────────────────────────
 
 # Monta os assets estáticos compilados do React se existirem
@@ -216,6 +222,42 @@ async def login_local(req: LoginRequisicao):
 async def health():
     """Health check local sem dados privados, usado pelo supervisor."""
     return {"status": "ok"}
+
+
+@app.get("/api/gemini/status")
+async def status_gemini(_: bool = Depends(autenticar)):
+    """Informa apenas se há uma chave; nunca devolve o segredo ao navegador."""
+    configurada = bool(
+        os.environ.get("GEMINI_API_KEY", "").strip()
+        or keyring.get_password("gideon", "gemini_api_key")
+        or keyring.get_password("alfred", "gemini_api_key")
+    )
+    return {"configurada": configurada, "modelo": cerebro.modelo}
+
+
+@app.post("/api/gemini/chave")
+async def configurar_chave_gemini(req: GeminiChaveRequisicao, _: bool = Depends(autenticar)):
+    """Valida e guarda a chave no cofre do sistema, fora do código e dos logs."""
+    chave = req.chave.strip()
+    if len(chave) < 20:
+        raise HTTPException(status_code=400, detail="A chave informada parece incompleta.")
+
+    def validar() -> None:
+        cliente = genai.Client(api_key=chave)
+        cliente.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents="Responda somente OK.",
+        )
+
+    try:
+        await asyncio.to_thread(validar)
+        keyring.set_password("gideon", "gemini_api_key", chave)
+        cerebro._cliente = None
+        if orquestrador_voz is not None:
+            orquestrador_voz.cerebro._cliente = None
+    except Exception as erro:
+        raise HTTPException(status_code=400, detail=f"O Gemini recusou a chave: {erro}") from erro
+    return {"status": "ok", "configurada": True, "modelo": cerebro.modelo}
 
 
 @app.post("/api/runtime/shutdown")

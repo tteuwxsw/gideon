@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,13 @@ def _esta_contido(caminho: Path, raiz: Path) -> bool:
 
 def _resolver_caminho_permitido(caminho: str | Path, *, base: Path) -> Path:
     """Resolve um caminho apenas dentro das areas explicitamente autorizadas."""
-    candidato = Path(os.path.expandvars(str(caminho).strip(" \"'")))
+    texto_caminho = os.path.expandvars(str(caminho).strip(" \"'"))
+    # Entradas podem vir de memórias/comandos criados no Windows. No Linux,
+    # trate a barra invertida como separador para não neutralizar a proteção
+    # contra travessia com caminhos como ``..\..\arquivo``.
+    if os.name != "nt":
+        texto_caminho = texto_caminho.replace("\\", "/")
+    candidato = Path(texto_caminho)
     if not candidato.is_absolute():
         candidato = base / candidato
     resolvido = candidato.resolve(strict=False)
@@ -126,7 +133,7 @@ def listar_arquivos(pasta: str = "downloads", limite: int = 20) -> dict[str, Any
 
 
 def abrir_pasta(pasta: str = "downloads") -> dict[str, Any]:
-    """Abre uma pasta no Explorador de Arquivos do Windows e VERIFICA se foi aberta."""
+    """Abre uma pasta no gerenciador de arquivos do sistema."""
     try:
         caminho = _resolver_pasta(pasta)
     except PermissionError as e:
@@ -140,6 +147,22 @@ def abrir_pasta(pasta: str = "downloads") -> dict[str, Any]:
         }
 
     try:
+        if os.name != "nt":
+            abridor = shutil.which("xdg-open") or shutil.which("gio")
+            if not abridor:
+                raise FileNotFoundError("xdg-open/gio não encontrado")
+            comando = [abridor, str(caminho.resolve())]
+            if Path(abridor).name == "gio":
+                comando.insert(1, "open")
+            proc = subprocess.Popen(comando, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.25)
+            sucesso = proc.poll() in {None, 0}
+            return {
+                "sucesso": sucesso,
+                "verificado": sucesso,
+                "evidencias": {"pasta": str(caminho.resolve()), "pid_lancado": proc.pid},
+                "mensagem_humana": f"Pronto, abri a pasta {caminho.name}." if sucesso else f"Não consegui abrir a pasta {caminho.name}.",
+            }
         proc = subprocess.Popen(
             ["explorer.exe", str(caminho.resolve())],
             stdout=subprocess.DEVNULL,
@@ -394,7 +417,7 @@ def criar_arquivo(caminho: str, conteudo: str = "", pasta: str = "documentos") -
 
 
 def mover_para_lixeira(caminho: str) -> dict[str, Any]:
-    """Move um arquivo para a Lixeira do Windows (ação reversível) e VERIFICA se saiu do local original."""
+    """Move um arquivo para a Lixeira do sistema e verifica a operação."""
     try:
         p = _resolver_caminho_permitido(caminho, base=PASTAS_COMUNS["documentos"])
     except PermissionError as e:
@@ -413,6 +436,27 @@ def mover_para_lixeira(caminho: str) -> dict[str, Any]:
             "erro": "A ferramenta de lixeira aceita somente arquivos regulares.",
             "mensagem_humana": "Por segurança, só posso mover arquivos regulares para a Lixeira por este comando, Henry.",
         }
+
+    if os.name != "nt":
+        gio = shutil.which("gio")
+        if not gio:
+            return {
+                "sucesso": False, "verificado": False,
+                "erro": "O comando 'gio' não está disponível para acessar a Lixeira.",
+                "mensagem_humana": "Não encontrei o serviço de Lixeira do Linux.",
+            }
+        try:
+            res = subprocess.run([gio, "trash", str(p)], capture_output=True, text=True, timeout=6.0)
+            sucesso = res.returncode == 0 and not p.exists()
+            return {
+                "sucesso": sucesso,
+                "verificado": sucesso,
+                "evidencias": {"caminho_original": str(p), "removido_do_diretorio": sucesso},
+                "erro": "" if sucesso else (res.stderr.strip() or "O arquivo permaneceu no diretório."),
+                "mensagem_humana": f"Pronto, movi '{p.name}' para a Lixeira." if sucesso else f"Não consegui mover '{p.name}' para a Lixeira.",
+            }
+        except Exception as e:
+            return {"sucesso": False, "verificado": False, "erro": str(e), "mensagem_humana": f"Não consegui mover '{p.name}' para a Lixeira."}
 
     caminho_escapado = str(p).replace("'", "''")
     ps_cmd = (

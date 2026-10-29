@@ -1,7 +1,7 @@
 """Módulo de síntese vocal (TTS) de baixa latência e identidade vocal única da Gideon.
 
 Características principais:
-1. Identidade Vocal Única e Imutável (PocketTTS local ou Thalita como recuperação):
+1. Identidade Vocal Única e Imutável (PocketTTS local ou Francisca como recuperação):
    - Elimina alternância entre vozes ou mudanças de timbre multilíngues.
    - Prosódia natural brasileira com tratamento fonético de siglas, números e nomes.
 2. Baixa Latência com Loop Assíncrono Persistente e Cache em RAM/Disco (`dados/cache_voz/`):
@@ -19,6 +19,7 @@ from collections import deque
 import hashlib
 import io
 from pathlib import Path
+import queue
 import re
 import subprocess
 import threading
@@ -35,10 +36,11 @@ from gideon.voz.pockettts_local import criar_motor_local
 CACHE_VOZ_DIR = DADOS_DIR / "cache_voz"
 
 # IDENTIDADE VOCAL ÚNICA E FIXA DA GIDEON (Nunca alterna entre locutoras)
-# Thalita oferece a diccao pt-BR mais natural sem filtros que artificializem o timbre.
-IDENTIFICADOR_VOZ_FIXA = "pt-BR-ThalitaMultilingualNeural"
-VELOCIDADE_VOZ_FIXA = "+0%"
-TOM_VOZ_FIXO = "+0Hz"
+# Francisca tem um timbre mais maduro, sereno e próximo da presença da Gideon.
+IDENTIFICADOR_VOZ_FIXA = "pt-BR-FranciscaNeural"
+VELOCIDADE_VOZ_FIXA = "-4%"
+TOM_VOZ_FIXO = "-3Hz"
+PERFIL_VOZ_CACHE = "francisca-natural-v1"
 
 # Frases curtas de uso frequente pré-aquecidas em cache para resposta instantânea (< 5ms)
 FRASES_PRE_AQUECIMENTO = (
@@ -185,7 +187,10 @@ class SintetizadorVoz:
         return self._falando
 
     def _chave_cache(self, texto_prosodia: str) -> str:
-        identidade = f"{self._identidade_cache}|{VELOCIDADE_VOZ_FIXA}|{TOM_VOZ_FIXO}|{texto_prosodia.strip().lower()}"
+        identidade = (
+            f"{PERFIL_VOZ_CACHE}|{self._identidade_cache}|{VELOCIDADE_VOZ_FIXA}|"
+            f"{TOM_VOZ_FIXO}|{texto_prosodia.strip().lower()}"
+        )
         return hashlib.sha256(identidade.encode("utf-8")).hexdigest()[:24]
 
     def _obter_do_cache(self, chave: str) -> tuple[np.ndarray, int] | None:
@@ -263,19 +268,30 @@ class SintetizadorVoz:
             return em_cache[0], em_cache[1], True
 
         amostras, taxa = self._gerar_audio_voz_fixa(texto_prosodia)
-        
-        # NOVO: Aplica efeitos da Gideon (The Flash) no áudio sintetizado
-        try:
-            from gideon.voz.efeito_gideon import aplicar_efeito_gideon_numpy
-            amostras = aplicar_efeito_gideon_numpy(amostras, taxa)
-        except Exception:
-            pass  # Se falhar, usa áudio sem efeitos
+        amostras = self._finalizar_audio_natural(amostras, taxa)
         
         # O motor local pode ter sido desativado durante a sintese; nesse caso,
-        # guarda o audio de recuperacao apenas sob a identidade da Thalita.
+        # guarda o audio de recuperacao apenas sob a identidade da Francisca.
         chave_final = self._chave_cache(texto_prosodia)
         self._salvar_no_cache(chave_final, amostras, taxa)
         return amostras, taxa, False
+
+    @staticmethod
+    def _finalizar_audio_natural(amostras: np.ndarray, taxa: int) -> np.ndarray:
+        """Uniformiza volume sem pitch, eco ou filtros que metalizem a voz."""
+        if len(amostras) == 0:
+            return amostras.astype(np.float32, copy=False)
+        audio = np.asarray(amostras, dtype=np.float32).copy()
+        audio -= float(np.mean(audio))
+        pico = float(np.max(np.abs(audio)))
+        if pico > 1e-6:
+            audio *= min(1.0, 0.92 / pico)
+        fade = min(len(audio) // 2, max(1, int(taxa * 0.008)))
+        if fade:
+            curva = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+            audio[:fade] *= curva
+            audio[-fade:] *= curva[::-1]
+        return np.clip(audio, -1.0, 1.0)
 
     def falar(self, texto: str) -> bool:
         """Sintetiza e reproduz o texto com identidade vocal única, baixa latência e Barge-In."""
@@ -331,19 +347,56 @@ class SintetizadorVoz:
             self._notificar({"tipo": "fala_inicio", "texto": "", "voz_id": self.voz_id})
 
             try:
-                for sentenca in iterador_sentencas:
-                    if self._evento_interromper.is_set():
-                        break
-                    s_limpa = limpar_texto_para_fala(sentenca)
-                    if not s_limpa:
-                        continue
-                    amostras, taxa, do_cache = self.sintetizar_para_memoria(s_limpa)
-                    if not primeiro_audio_emitido:
-                        self.ultima_latencia_ttfa_ms = (time.perf_counter() - t_inicio) * 1000.0
-                        self.ultimo_foi_cache = do_cache
-                        primeiro_audio_emitido = True
-                    if len(amostras) > 0 and not self._evento_interromper.is_set():
-                        self._reproduzir_audio(amostras, taxa)
+                # O produtor continua recebendo o Gemini e sintetizando a próxima
+                # frase enquanto a frase atual toca. Isso elimina os cortes entre
+                # sentenças causados pela rede no caminho de reprodução.
+                import concurrent.futures
+
+                fila: queue.Queue[object] = queue.Queue(maxsize=3)
+                fim = object()
+                trabalhadores = 1 if self._pockettts else 2
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=trabalhadores) as pool:
+                    def produzir() -> None:
+                        try:
+                            for sentenca in iterador_sentencas:
+                                if self._evento_interromper.is_set():
+                                    break
+                                s_limpa = limpar_texto_para_fala(sentenca)
+                                if not s_limpa:
+                                    continue
+                                item = pool.submit(self.sintetizar_para_memoria, s_limpa)
+                                while not self._evento_interromper.is_set():
+                                    try:
+                                        fila.put(item, timeout=0.1)
+                                        break
+                                    except queue.Full:
+                                        continue
+                        finally:
+                            while True:
+                                try:
+                                    fila.put(fim, timeout=0.1)
+                                    break
+                                except queue.Full:
+                                    if self._evento_interromper.is_set():
+                                        break
+
+                    produtor = threading.Thread(target=produzir, name="gideon-tts-producer", daemon=True)
+                    produtor.start()
+
+                    while not self._evento_interromper.is_set():
+                        item = fila.get()
+                        if item is fim:
+                            break
+                        amostras, taxa, do_cache = item.result(timeout=15.0)
+                        if not primeiro_audio_emitido:
+                            self.ultima_latencia_ttfa_ms = (time.perf_counter() - t_inicio) * 1000.0
+                            self.ultimo_foi_cache = do_cache
+                            primeiro_audio_emitido = True
+                        if len(amostras) > 0:
+                            self._reproduzir_audio(amostras, taxa)
+
+                    produtor.join(timeout=1.0)
                 return not self.foi_interrompida
             finally:
                 self._falando = False
@@ -514,7 +567,7 @@ class SintetizadorVoz:
                 if self._evento_interromper.is_set():
                     sd.stop()
                     break
-                pass  # TURBO: sleep removido
+                time.sleep(0.01)
         finally:
             parar_monitoramento.set()
             thread_nivel.join(timeout=0.2)
@@ -533,7 +586,7 @@ class SintetizadorVoz:
                 if time.time() - inicio > duracao_estimada + 1.0:
                     break
                 self._notificar({"tipo": "voz_nivel", "nivel": 0.45})
-                pass  # TURBO: sleep removido
+                time.sleep(0.04)
 
         thread_nivel = threading.Thread(target=_publicar_nivel_estimado, daemon=True)
         thread_nivel.start()
@@ -559,7 +612,7 @@ class SintetizadorVoz:
                 if self._evento_interromper.is_set():
                     self._processo_windows.terminate()
                     break
-                pass  # TURBO: sleep removido
+                time.sleep(0.02)
         finally:
             self._processo_windows = None
             parar_nivel.set()

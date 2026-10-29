@@ -10,6 +10,8 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import json
+import os
+import subprocess
 import shutil
 import threading
 import time
@@ -19,8 +21,8 @@ import psutil
 
 from gideon.caminhos import DADOS_DIR
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
+user32 = ctypes.windll.user32 if os.name == "nt" else None
+kernel32 = ctypes.windll.kernel32 if os.name == "nt" else None
 
 
 class LASTINPUTINFO(ctypes.Structure):
@@ -30,6 +32,12 @@ class LASTINPUTINFO(ctypes.Structure):
 def _tempo_ocioso_segundos() -> float:
     """Retorna quanto tempo o teclado e mouse do Windows estão ociosos (sem interação)."""
     try:
+        if os.name != "nt":
+            xprintidle = shutil.which("xprintidle")
+            if not xprintidle:
+                return 0.0
+            resultado = subprocess.run([xprintidle], capture_output=True, text=True, timeout=1)
+            return max(0.0, float(resultado.stdout.strip()) / 1000.0)
         lii = LASTINPUTINFO()
         lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
         if user32.GetLastInputInfo(ctypes.byref(lii)):
@@ -140,12 +148,13 @@ class VigilanteProativo:
 
                 # 3. Verificação de Espaço em Disco C: (< 15 GB)
                 try:
-                    disco_c = shutil.disk_usage("C:\\")
+                    disco_c = shutil.disk_usage("C:\\" if os.name == "nt" else "/")
                     gb_livres = disco_c.free / (1024 ** 3)
                     if gb_livres < 15.0:
                         if agora - self._cooldowns["disco_cheio"] > 7200.0:  # 2 horas cooldown
                             self._cooldowns["disco_cheio"] = agora
-                            msg = f"Aviso de armazenamento: restam apenas {gb_livres:.1f} GB livres no disco C:. Recomendo uma limpeza preventiva de arquivos temporários."
+                            unidade = "disco C:" if os.name == "nt" else "disco principal"
+                            msg = f"Aviso de armazenamento: restam apenas {gb_livres:.1f} GB livres no {unidade}. Recomendo uma limpeza preventiva de arquivos temporários."
                             self._disparar_alerta("disco_cheio", msg, nivel="aviso", pode_falar=False)
                 except Exception:
                     pass

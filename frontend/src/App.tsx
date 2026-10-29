@@ -58,9 +58,10 @@ export const App: React.FC = () => {
         const statusResponse = await apiFetch('/api/status')
         if (!statusResponse.ok) throw new Error('Abra a Gideon pelo atalho do aplicativo.')
         const status = await statusResponse.json()
-        const [languageResponse, voiceResponse] = await Promise.all([
+        const [languageResponse, voiceResponse, geminiResponse] = await Promise.all([
           apiFetch('/api/idioma'),
-          apiFetch('/api/voz/status')
+          apiFetch('/api/voz/status'),
+          apiFetch('/api/gemini/status')
         ])
 
         setEmergencyStopped(Boolean(status.parada_emergencia))
@@ -72,6 +73,15 @@ export const App: React.FC = () => {
           const voice = await voiceResponse.json()
           if (voice.modo_escuta) setVoiceMode(voice.modo_escuta)
           setIsListening(Boolean(voice.ativa ?? voice.ativo ?? voice.escuta_ativa ?? voice.rodando))
+        }
+        if (geminiResponse.ok) {
+          const gemini = await geminiResponse.json()
+          if (!gemini.configurada) {
+            setVigilanteAlert({
+              mensagem: 'Conecte sua chave do Gemini em Configurações para habilitar respostas de IA.',
+              nivel: 'info'
+            })
+          }
         }
         setAuthReady(true)
       } catch (error) {
@@ -344,7 +354,7 @@ export const App: React.FC = () => {
         <div className="flex items-center gap-3">
           <div className={`connection-dot ${connection}`} aria-hidden="true" />
           <h1 className="brand-name">
-            Gideon <span className="brand-version">Nucleo local ? v0.4.6</span>
+            Gideon <span className="brand-version">Núcleo local · v0.4.6</span>
           </h1>
         </div>
 

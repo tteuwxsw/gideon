@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import os
+import shutil
+import subprocess
 import time
 from typing import Any
 
 from gideon.gate import Ferramenta, Risco
 
-user32 = ctypes.windll.user32
+user32 = ctypes.windll.user32 if os.name == "nt" else None
 
 
 class RECT(ctypes.Structure):
@@ -21,7 +24,7 @@ class RECT(ctypes.Structure):
     ]
 
 
-WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM) if os.name == "nt" else None
 
 SW_RESTORE = 9
 SW_MINIMIZE = 6
@@ -49,6 +52,21 @@ def _obter_area_trabalho() -> tuple[int, int, int, int]:
 
 def _obter_janelas_ativas() -> list[dict[str, Any]]:
     """Lista janelas visíveis de aplicativos de usuário com seus identificadores (HWND) e títulos."""
+    if os.name != "nt":
+        wmctrl = shutil.which("wmctrl")
+        if not wmctrl:
+            return []
+        resultado = subprocess.run([wmctrl, "-lp"], capture_output=True, text=True)
+        janelas = []
+        for linha in resultado.stdout.splitlines():
+            partes = linha.split(None, 4)
+            if len(partes) == 5 and partes[4].strip():
+                try:
+                    pid = int(partes[2])
+                except ValueError:
+                    pid = 0
+                janelas.append({"hwnd": partes[0], "pid": pid, "titulo": partes[4].strip()})
+        return janelas
     try:
         hdesk = user32.OpenInputDesktop(0, False, 0x01FF)
         if hdesk:
@@ -86,8 +104,49 @@ def _obter_janelas_ativas() -> list[dict[str, Any]]:
     return janelas
 
 
+def _organizar_janelas_linux(disposicao: str) -> dict[str, Any]:
+    wmctrl = shutil.which("wmctrl")
+    janelas = _obter_janelas_ativas()
+    if not wmctrl or not janelas:
+        return {
+            "sucesso": False,
+            "mensagem_humana": "Não encontrei janelas ou o utilitário wmctrl no Linux.",
+        }
+    area = subprocess.run([wmctrl, "-d"], capture_output=True, text=True).stdout
+    import re
+    match = re.search(r"DG:\s*(\d+)x(\d+)", area)
+    largura, altura = (int(match.group(1)), int(match.group(2))) if match else (1920, 1080)
+    disp = disposicao.lower().strip()
+    alvos = janelas[:4 if disp in {"grade", "quatro_cantos", "grid"} else 2]
+    if disp in {"lado_a_lado", "dividir_tela", "split"}:
+        geometrias = [(0, 0, largura // 2, altura), (largura // 2, 0, largura // 2, altura)]
+    elif disp in {"grade", "quatro_cantos", "grid"}:
+        geometrias = [
+            (0, 0, largura // 2, altura // 2), (largura // 2, 0, largura // 2, altura // 2),
+            (0, altura // 2, largura // 2, altura // 2), (largura // 2, altura // 2, largura // 2, altura // 2),
+        ]
+    elif disp in {"cascata", "cascade"}:
+        alvos = janelas[:6]
+        geometrias = [(30 + i * 40, 30 + i * 40, int(largura * .7), int(altura * .7)) for i in range(len(alvos))]
+    elif disp in {"minimizar_outras", "focar_unica"}:
+        for janela in janelas[1:]:
+            subprocess.run([wmctrl, "-ir", janela["hwnd"], "-b", "add,hidden"], capture_output=True)
+        return {"sucesso": True, "layout": "minimizar_outras", "mensagem_humana": "Mantive a janela principal e minimizei as demais."}
+    else:
+        return {"sucesso": False, "erro": f"Disposição '{disposicao}' não reconhecida."}
+    for janela, (x, y, w, h) in zip(alvos, geometrias):
+        subprocess.run([wmctrl, "-ir", janela["hwnd"], "-b", "remove,maximized_vert,maximized_horz"], capture_output=True)
+        subprocess.run([wmctrl, "-ir", janela["hwnd"], "-e", f"0,{x},{y},{w},{h}"], capture_output=True)
+    return {
+        "sucesso": True, "layout": disp, "janelas": [j["titulo"] for j in alvos],
+        "mensagem_humana": f"Organizei {len(alvos)} janelas no formato {disp}.",
+    }
+
+
 def organizar_janelas(disposicao: str = "lado_a_lado") -> dict[str, Any]:
     """Organiza as janelas abertas na tela (lado_a_lado, grade, cascata, minimizar_outras)."""
+    if os.name != "nt":
+        return _organizar_janelas_linux(disposicao)
     orig_x, orig_y, largura_total, altura_total = _obter_area_trabalho()
     janelas = _obter_janelas_ativas()
 
@@ -209,9 +268,34 @@ def organizar_janelas(disposicao: str = "lado_a_lado") -> dict[str, Any]:
 
 
 def controlar_som_sistema(acao: str = "mutar", toques: int = 2) -> dict[str, Any]:
-    """Controla o som e multimídia do Windows (mutar, desmutar, aumentar, diminuir, play_pause, proxima)."""
+    """Controla som e multimídia no Windows ou Linux."""
     acao_norm = acao.lower().strip()
     toques = max(1, min(15, toques))
+
+    if os.name != "nt":
+        pactl = shutil.which("pactl")
+        playerctl = shutil.which("playerctl")
+        if acao_norm in ["mutar", "desmutar", "mudo"] and pactl:
+            comando, msg = [pactl, "set-sink-mute", "@DEFAULT_SINK@", "toggle"], "Alternado o estado de mudo do sistema."
+        elif acao_norm in ["aumentar", "subir"] and pactl:
+            comando, msg = [pactl, "set-sink-volume", "@DEFAULT_SINK@", f"+{toques * 5}%"], f"Aumentei o volume do sistema ({toques} níveis)."
+        elif acao_norm in ["diminuir", "abaixar", "baixar"] and pactl:
+            comando, msg = [pactl, "set-sink-volume", "@DEFAULT_SINK@", f"-{toques * 5}%"], f"Diminui o volume do sistema ({toques} níveis)."
+        elif acao_norm in ["play", "pause", "play_pause", "pausar"] and playerctl:
+            comando, msg = [playerctl, "play-pause"], "Comando de reproduzir/pausar enviado ao reprodutor de mídia."
+        elif acao_norm in ["proxima", "next"] and playerctl:
+            comando, msg = [playerctl, "next"], "Avançado para a próxima faixa."
+        elif acao_norm in ["anterior", "prev"] and playerctl:
+            comando, msg = [playerctl, "previous"], "Retornado para a faixa anterior."
+        else:
+            return {"sucesso": False, "erro": "Comando indisponível; instale pactl e playerctl."}
+        resultado = subprocess.run(comando, capture_output=True, text=True)
+        return {
+            "sucesso": resultado.returncode == 0,
+            "acao": acao_norm,
+            "erro": resultado.stderr.strip() if resultado.returncode else "",
+            "mensagem_humana": msg if resultado.returncode == 0 else "Não consegui controlar o som ou a mídia.",
+        }
 
     def apertar_tecla(vk: int, vezes: int = 1):
         for _ in range(vezes):

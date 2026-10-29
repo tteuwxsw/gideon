@@ -1,4 +1,4 @@
-"""CLI de controle do subsistema Gideon para Windows."""
+"""CLI de controle do subsistema Gideon para Windows e Linux."""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ import os
 import subprocess
 import sys
 import time
+import shlex
 from pathlib import Path
+
+import psutil
 
 from gideon.caminhos import DADOS_DIR, FROZEN, INSTALL_DIR, ROOT_DIR
 from gideon.supervisor import (
@@ -44,10 +47,28 @@ def _iniciar_app(*argumentos: str) -> None:
         _comando_app(*argumentos),
         cwd=INSTALL_DIR if FROZEN else ROOT_DIR,
         creationflags=flags,
+        start_new_session=os.name != "nt",
         close_fds=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _iniciar_servico_systemd() -> bool:
+    """Inicia a unidade do usuário no Linux, mantendo o núcleo sob supervisão."""
+    if os.name == "nt" or FROZEN:
+        return False
+    try:
+        resultado = subprocess.run(
+            ["systemctl", "--user", "start", "gideon.service"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
+        )
+        return resultado.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _aguardar(condicao, *, timeout: float) -> bool:
@@ -76,11 +97,26 @@ def _estado() -> dict:
     }
 
 
+def _interface_visivel() -> bool:
+    try:
+        runtime = json.loads(RUNTIME_FILE.read_text(encoding="utf-8"))
+        pid = runtime.get("app_pid")
+        return runtime.get("interface") == "visivel" and bool(pid) and psutil.pid_exists(int(pid))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def _cmd_open(args) -> int:
     if not sinalizar_abertura():
-        _iniciar_app("--open")
-    pronto = not args.wait or _aguardar(_backend_ativo, timeout=args.timeout)
-    _emitir("Gideon aberta." if pronto else "O nucleo nao respondeu a tempo.", json_output=args.json, ok=pronto)
+        if _iniciar_servico_systemd():
+            iniciou = _aguardar(supervisor_ativo, timeout=min(args.timeout, 15.0))
+            if not iniciou or not sinalizar_abertura():
+                _emitir("O serviço iniciou, mas não recebeu o pedido para abrir.", json_output=args.json, ok=False)
+                return 1
+        else:
+            _iniciar_app("--open")
+    pronto = not args.wait or _aguardar(_interface_visivel, timeout=args.timeout)
+    _emitir("Gideon aberta." if pronto else "O nucleo respondeu, mas a janela nao foi aberta.", json_output=args.json, ok=pronto)
     return 0 if pronto else 1
 
 
@@ -172,6 +208,7 @@ def _cmd_logs(args) -> int:
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "Gideon"
+LINUX_AUTOSTART_FILE = Path.home() / ".config" / "autostart" / "gideon.desktop"
 
 
 def _comando_autostart() -> str:
@@ -182,8 +219,32 @@ def _comando_autostart() -> str:
 
 def _cmd_autostart(args) -> int:
     if os.name != "nt":
-        _emitir("A inicializacao automatica requer Windows.", json_output=args.json, ok=False)
-        return 1
+        comando = " ".join(shlex.quote(item) for item in _comando_app("--background"))
+        if args.action == "enable":
+            LINUX_AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
+            LINUX_AUTOSTART_FILE.write_text(
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Gideon\n"
+                "Comment=Assistente pessoal Gideon\n"
+                f"Exec={comando}\n"
+                "Terminal=false\n"
+                "X-GNOME-Autostart-enabled=true\n",
+                encoding="utf-8",
+            )
+        elif args.action == "disable":
+            LINUX_AUTOSTART_FILE.unlink(missing_ok=True)
+        ativo = LINUX_AUTOSTART_FILE.is_file()
+        mensagens = {
+            "enable": "Gideon sera iniciada no proximo login.",
+            "disable": "Inicializacao automatica removida.",
+            "status": "Inicializacao automatica ativa." if ativo else "Inicializacao automatica desativada.",
+        }
+        _emitir(
+            mensagens[args.action], json_output=args.json, ok=True, ativo=ativo,
+            comando=comando if ativo else "",
+        )
+        return 0
 
     import winreg
 

@@ -1,0 +1,22 @@
+[Unit]
+Description=Gideon - assistente pessoal local
+Documentation=file://@ROOT_DIR@/README.md
+After=graphical-session.target network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT_DIR@
+ExecStart=@PYTHON@ -m gideon.supervisor --background
+ExecStop=@PYTHON@ -m gideon.cli stop --no-wait
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=20
+KillMode=mixed
+Environment=PYTHONUNBUFFERED=1
+Environment=GIDEON_MANAGED_BY_SYSTEMD=1
+Environment=GIDEON_DATA_DIR=%h/.local/share/gideon
+
+[Install]
+WantedBy=default.target
