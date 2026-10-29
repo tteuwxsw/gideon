@@ -208,6 +208,35 @@ def detectar_mudanca_modo_escuta(texto: str) -> str | None:
     return None
 
 
+def detectar_modo_personalidade(texto: str) -> str | None:
+    """Detecta pedidos explícitos para trocar o estilo de personalidade."""
+    t = re.sub(r"[^a-z0-9 ]", " ", normalizar(texto))
+    t = " ".join(t.split())
+    correspondencias = {
+        "padrao": r"\bmodo (?:padrao|normal)\b",
+        "formal": r"\bmodo formal\b",
+        "direta": r"\bmodo diret[ao]\b",
+        "sarcastica": r"\bmodo sarcastic[ao]\b",
+    }
+    for modo, padrao in correspondencias.items():
+        if re.search(padrao, t):
+            return modo
+    return None
+
+
+def eh_pergunta_modo_personalidade(texto: str) -> bool:
+    """Reconhece perguntas curtas sobre o modo de personalidade atual."""
+    t = re.sub(r"[^a-z0-9 ]", " ", normalizar(texto))
+    t = " ".join(t.split())
+    return t in {
+        "qual seu modo",
+        "qual e seu modo",
+        "qual o seu modo",
+        "em qual modo voce esta",
+        "que modo voce esta usando",
+    }
+
+
 def avaliar_fala_direcionada(
     texto: str,
     contexto: dict[str, Any] | None = None,

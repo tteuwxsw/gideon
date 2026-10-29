@@ -11,7 +11,12 @@ from typing import Callable, Any, Generator
 import numpy as np
 
 from gideon.cerebro import Cerebro
-from gideon.configuracao import definir_interrupcao_voz_ativa, obter_interrupcao_voz_ativa
+from gideon.configuracao import (
+    definir_interrupcao_voz_ativa,
+    definir_modo_personalidade,
+    obter_interrupcao_voz_ativa,
+    obter_modo_personalidade,
+)
 from gideon.executor import EstadoExecucao, ExecutorConfiavel, ResultadoExecucao
 from gideon.gate import ativar_parada_emergencia, retomar_execucao
 from gideon.memoria import Memoria
@@ -19,7 +24,9 @@ from gideon.tools import obter_catalogo_ferramentas
 from gideon.voz.comandos import (
     avaliar_fala_direcionada,
     detectar_comando_sistema,
+    detectar_modo_personalidade,
     detectar_mudanca_modo_escuta,
+    eh_pergunta_modo_personalidade,
     eh_encerramento_conversa,
     eh_pedido_abrir_interface,
     eh_interrupcao_barge_in,
@@ -358,7 +365,35 @@ class OrquestradorVoz:
             self.ultimo_llm_ttft_ms = 0.0
             return "Tudo bem, ação cancelada." if cancelou_acao else "Tudo bem."
 
-        # 2. Mudança de modo de escuta por voz
+        # 2. Mudança ou consulta do modo de personalidade por voz
+        novo_modo_personalidade = detectar_modo_personalidade(comando_limpo)
+        if novo_modo_personalidade:
+            definir_modo_personalidade(novo_modo_personalidade)
+            nomes_personalidade = {
+                "padrao": "padrão",
+                "formal": "formal",
+                "direta": "direta",
+                "sarcastica": "sarcástica",
+            }
+            self.ultima_origem_resposta = "comando_local"
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            self.ultimo_llm_ttft_ms = 0.0
+            return f"Modo {nomes_personalidade[novo_modo_personalidade]} ativado."
+
+        if eh_pergunta_modo_personalidade(comando_limpo):
+            nomes_personalidade = {
+                "padrao": "padrão",
+                "formal": "formal",
+                "direta": "direta",
+                "sarcastica": "sarcástica",
+            }
+            modo_atual = obter_modo_personalidade()
+            self.ultima_origem_resposta = "comando_local"
+            self.ultimo_nlu_ms = (time.perf_counter() - t0) * 1000.0
+            self.ultimo_llm_ttft_ms = 0.0
+            return f"Meu modo atual é {nomes_personalidade[modo_atual]}."
+
+        # 3. Mudança de modo de escuta por voz
         novo_modo = detectar_mudanca_modo_escuta(comando_limpo)
         if novo_modo:
             self.configurar(modo_escuta=novo_modo)
@@ -372,7 +407,7 @@ class OrquestradorVoz:
             self.ultimo_llm_ttft_ms = 0.0
             return f"Modo de {nomes_amigaveis.get(novo_modo, novo_modo)} ativado."
 
-        # 3. Encerramento educado da sessão de conversa
+        # 4. Encerramento educado da sessão de conversa
         if eh_encerramento_conversa(comando_limpo):
             self._em_conversa_ativa = False
             if self.modo_escuta == ModoEscuta.CONVERSA_LIVRE:
@@ -382,7 +417,7 @@ class OrquestradorVoz:
             self.ultimo_llm_ttft_ms = 0.0
             return "Tudo bem."
 
-        # 4. Confirmações pendentes (Portão Vermelho ou Recuperação Automática de Falha)
+        # 5. Confirmações pendentes (Portão Vermelho ou Recuperação Automática de Falha)
         resposta_sistema = self._processar_comando_sistema(comando_limpo)
         if resposta_sistema:
             self._registrar_turno_sessao(comando_limpo, _limpar_tags_legadas(resposta_sistema))
@@ -391,7 +426,7 @@ class OrquestradorVoz:
             self.ultimo_llm_ttft_ms = 0.0
             return resposta_sistema
 
-        # 5. Comandos diretos de memória permanente ("lembra que...", "o que você sabe sobre mim?")
+        # 6. Comandos diretos de memória permanente ("lembra que...", "o que você sabe sobre mim?")
         resp_memoria = self.memoria.processar_comando_explicito(comando_limpo)
         if resp_memoria:
             self.memoria.gravar_mensagem("voce", comando_limpo)

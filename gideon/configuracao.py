@@ -32,9 +32,12 @@ IDIOMAS_SUPORTADOS = {
     },
 }
 
+MODOS_PERSONALIDADE = frozenset({"padrao", "formal", "direta", "sarcastica"})
+
 CONFIG_PADRAO: dict[str, Any] = {
     "idioma": "pt-BR",
     "interrupcao_voz_ativa": True,
+    "modo_personalidade": "padrao",
 }
 
 
@@ -91,6 +94,23 @@ def definir_interrupcao_voz_ativa(ativa: bool) -> bool:
     config["interrupcao_voz_ativa"] = bool(ativa)
     salvar_configuracao(config)
     return bool(ativa)
+
+
+def obter_modo_personalidade() -> str:
+    """Retorna o modo de personalidade persistido ou o padrão seguro."""
+    modo = str(carregar_configuracao().get("modo_personalidade", "padrao")).strip().lower()
+    return modo if modo in MODOS_PERSONALIDADE else "padrao"
+
+
+def definir_modo_personalidade(modo: str) -> str:
+    """Valida e persiste o modo de personalidade da Gideon."""
+    modo_normalizado = str(modo or "").strip().lower()
+    if modo_normalizado not in MODOS_PERSONALIDADE:
+        raise ValueError(f"Modo de personalidade inválido: {modo}")
+    config = carregar_configuracao()
+    config["modo_personalidade"] = modo_normalizado
+    salvar_configuracao(config)
+    return modo_normalizado
 
 
 def obter_voz_para_idioma(idioma: str | None = None) -> str:
