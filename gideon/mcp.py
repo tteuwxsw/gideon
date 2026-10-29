@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import threading
 import time
@@ -20,15 +21,67 @@ from gideon.gate import Ferramenta, Risco
 ARQUIVO_MCP = DADOS_DIR / "mcp_servers.json"
 
 CONFIG_PADRAO = {
+    "_README": (
+        "Todos os servidores nascem desativados. Para ativar um, confirme o comando e troque "
+        "enabled para true. Reinicie a Gideon. Escritas e remoções MCP sempre exigem confirmação."
+    ),
     "mcpServers": {
+        "fetch": {
+            "command": "uvx",
+            "args": ["mcp-server-fetch"],
+            "enabled": False,
+            "descricao": "Servidor MCP oficial para leitura de páginas web.",
+            "como_ativar": "Instale o uv/uvx, revise o risco de acesso a URLs internas e altere enabled para true.",
+        },
         "sistema_arquivos": {
             "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem", str(Path.home() / "Documents")],
-            "ativo": False,
-            "descricao": "Servidor MCP oficial para navegação profunda no sistema de arquivos.",
-        }
-    }
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", str(Path.home() / "Documentos")],
+            "enabled": False,
+            "descricao": "Servidor MCP oficial restrito à pasta Documentos do usuário.",
+            "como_ativar": "Confirme a pasta permitida, tenha Node.js 24+ com npx e altere enabled para true.",
+        },
+        "notas": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-memory"],
+            "env": {"MEMORY_FILE_PATH": str(Path.home() / "Documentos" / "notas-gideon-mcp.jsonl")},
+            "enabled": False,
+            "descricao": "Servidor MCP oficial de memória local usado para notas estruturadas.",
+            "como_ativar": "Tenha Node.js 24+ com npx, confirme o arquivo de notas e altere enabled para true.",
+        },
+    },
 }
+
+_ACOES_MCP_ESCRITA = frozenset({
+    "add", "append", "create", "delete", "edit", "insert", "move", "remove",
+    "rename", "replace", "update", "write",
+})
+_PREFIXOS_MCP_LEITURA = (
+    "fetch", "find", "get", "list", "open", "query", "read", "search", "show",
+)
+
+
+def _servidor_habilitado(cfg: dict[str, Any]) -> bool:
+    """Aceita o campo novo `enabled` sem quebrar configurações antigas com `ativo`."""
+    if "enabled" in cfg:
+        return cfg.get("enabled") is True
+    return cfg.get("ativo") is True
+
+
+def _risco_ferramenta_mcp(info: dict[str, Any]) -> Risco:
+    """Classifica ferramentas MCP de modo conservador; desconhecidas exigem confirmação."""
+    anotacoes = info.get("annotations") or {}
+    if anotacoes.get("destructiveHint") is True:
+        return Risco.VERMELHO
+    if "readOnlyHint" in anotacoes:
+        return Risco.VERDE if anotacoes.get("readOnlyHint") is True else Risco.VERMELHO
+
+    nome = str(info.get("name") or "").strip().lower().replace("-", "_")
+    partes = set(nome.split("_"))
+    if partes & _ACOES_MCP_ESCRITA:
+        return Risco.VERMELHO
+    if nome.startswith(_PREFIXOS_MCP_LEITURA):
+        return Risco.VERDE
+    return Risco.VERMELHO
 
 
 def _garantir_config_mcp() -> dict[str, Any]:
@@ -52,7 +105,10 @@ class SessaoServidorMCP:
         self.env = env or {}
         self.processo: subprocess.Popen | None = None
         self._req_id = 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._fila_stdout: queue.Queue[str] = queue.Queue()
+        self._thread_stdout: threading.Thread | None = None
+        self._thread_stderr: threading.Thread | None = None
         self.ferramentas_descobertas: list[dict[str, Any]] = []
 
     def iniciar(self, timeout_s: float = 6.0) -> bool:
@@ -62,6 +118,7 @@ class SessaoServidorMCP:
                 cmd_completo = [self.comando, *self.args]
                 ambiente = os.environ.copy()
                 ambiente.update(self.env)
+                self._fila_stdout = queue.Queue()
 
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 self.processo = subprocess.Popen(
@@ -74,6 +131,18 @@ class SessaoServidorMCP:
                     env=ambiente,
                     creationflags=flags,
                 )
+                self._thread_stdout = threading.Thread(
+                    target=self._ler_stdout,
+                    daemon=True,
+                    name=f"gideon-mcp-{self.nome}",
+                )
+                self._thread_stdout.start()
+                self._thread_stderr = threading.Thread(
+                    target=self._drenar_stderr,
+                    daemon=True,
+                    name=f"gideon-mcp-{self.nome}-stderr",
+                )
+                self._thread_stderr.start()
 
                 # 1. Envia requisição 'initialize'
                 req_init = {
@@ -81,7 +150,7 @@ class SessaoServidorMCP:
                     "id": self._proximo_id(),
                     "method": "initialize",
                     "params": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": "2025-11-25",
                         "capabilities": {},
                         "clientInfo": {"name": "Gideon", "version": "1.0"},
                     },
@@ -103,8 +172,10 @@ class SessaoServidorMCP:
                     "params": {},
                 }
                 res_tools = self._enviar_e_aguardar(req_tools, timeout_s=timeout_s)
-                if res_tools and "result" in res_tools:
-                    self.ferramentas_descobertas = res_tools["result"].get("tools", [])
+                if not res_tools or "result" not in res_tools:
+                    self.encerrar()
+                    return False
+                self.ferramentas_descobertas = res_tools["result"].get("tools", [])
 
                 return True
             except Exception as e:
@@ -128,6 +199,7 @@ class SessaoServidorMCP:
 
             res = self._enviar_e_aguardar(req, timeout_s=timeout_s)
             if not res:
+                self.encerrar()
                 return {"sucesso": False, "erro": f"Tempo esgotado aguardando MCP '{self.nome}'."}
 
             if "error" in res:
@@ -140,9 +212,33 @@ class SessaoServidorMCP:
 
             return {
                 "sucesso": not resultado.get("isError", False),
+                "verificado": not resultado.get("isError", False),
                 "conteudo": resposta_texto,
+                "evidencias": {"servidor_mcp": self.nome, "ferramenta_mcp": nome_ferramenta},
                 "mensagem_humana": resposta_texto,
             }
+
+    def _ler_stdout(self) -> None:
+        """Lê stdout fora da thread principal para que servidores travados respeitem o timeout."""
+        processo = self.processo
+        if not processo or not processo.stdout:
+            return
+        try:
+            for linha in iter(processo.stdout.readline, ""):
+                self._fila_stdout.put(linha)
+        except Exception:
+            pass
+
+    def _drenar_stderr(self) -> None:
+        """Evita bloqueio por stderr cheio sem registrar possíveis dados sensíveis do servidor."""
+        processo = self.processo
+        if not processo or not processo.stderr:
+            return
+        try:
+            for _linha in iter(processo.stderr.readline, ""):
+                pass
+        except Exception:
+            pass
 
     def _proximo_id(self) -> int:
         self._req_id += 1
@@ -165,9 +261,10 @@ class SessaoServidorMCP:
         while time.time() - inicio < timeout_s:
             if self.processo.poll() is not None:
                 return None
-            linha = self.processo.stdout.readline()
-            if not linha:
-                time.sleep(0.05)
+            restante = max(0.0, timeout_s - (time.time() - inicio))
+            try:
+                linha = self._fila_stdout.get(timeout=min(0.1, restante))
+            except queue.Empty:
                 continue
             try:
                 d = json.loads(linha.strip())
@@ -207,15 +304,20 @@ class GerenciadorMCP:
             novas_ferramentas: list[Ferramenta] = []
 
             for nome, cfg in servers.items():
-                if not cfg.get("ativo", False):
+                if not isinstance(cfg, dict) or not _servidor_habilitado(cfg):
                     continue
+                try:
+                    cmd = str(cfg.get("command", "")).strip()
+                    args = cfg.get("args", [])
+                    env = cfg.get("env", {})
+                    if not cmd or not isinstance(args, list) or not isinstance(env, dict):
+                        raise ValueError("configuração MCP inválida")
 
-                cmd = cfg.get("command", "")
-                args = cfg.get("args", [])
-                env = cfg.get("env", {})
+                    sessao = SessaoServidorMCP(nome, cmd, [str(a) for a in args], {str(k): str(v) for k, v in env.items()})
+                    if not sessao.iniciar():
+                        print(f"  [MCP] Servidor '{nome}' indisponível; seguindo sem ele.")
+                        continue
 
-                sessao = SessaoServidorMCP(nome, cmd, args, env)
-                if sessao.iniciar():
                     self.sessoes[nome] = sessao
                     print(f"  [MCP] Servidor '{nome}' conectado! ({len(sessao.ferramentas_descobertas)} ferramentas)")
 
@@ -223,7 +325,6 @@ class GerenciadorMCP:
                         t_nome = t_info.get("name", "sem_nome")
                         t_desc = t_info.get("description", f"Ferramenta fornecida pelo servidor MCP '{nome}'.")
                         t_schema = t_info.get("inputSchema", {"type": "object", "properties": {}})
-
                         nome_registrado = f"mcp_{nome}_{t_nome}"
 
                         def criar_handler(s: SessaoServidorMCP, nome_original: str):
@@ -232,12 +333,14 @@ class GerenciadorMCP:
                         ferr = Ferramenta(
                             nome=nome_registrado,
                             descricao=f"[MCP {nome}] {t_desc}",
-                            risco=Risco.AMARELO,
+                            risco=_risco_ferramenta_mcp(t_info),
                             executar=criar_handler(sessao, t_nome),
                             frase=lambda nome_orig=t_nome, s_nome=nome, **kw: f"executar ação MCP '{nome_orig}' no servidor '{s_nome}'",
                             parametros=t_schema,
                         )
                         novas_ferramentas.append(ferr)
+                except Exception as e:
+                    print(f"  [MCP] Falha no servidor '{nome}': {e}. Seguindo sem ele.")
 
             return novas_ferramentas
 
@@ -267,14 +370,14 @@ def listar_servidores_mcp() -> dict[str, Any]:
 
     status_lista = []
     for nome, cfg in servidores.items():
-        ativo = cfg.get("ativo", False)
+        ativo = _servidor_habilitado(cfg) if isinstance(cfg, dict) else False
         conectado = nome in mgr.sessoes and mgr.sessoes[nome].processo is not None
         ferramentas = [t.get("name") for t in mgr.sessoes[nome].ferramentas_descobertas] if conectado else []
         status_lista.append({
             "nome": nome,
             "ativo": ativo,
             "conectado": conectado,
-            "descricao": cfg.get("descricao", ""),
+            "descricao": cfg.get("descricao", "") if isinstance(cfg, dict) else "",
             "ferramentas": ferramentas,
         })
 
