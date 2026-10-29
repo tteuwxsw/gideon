@@ -1,0 +1,38 @@
+{
+  "_README": "Todos os servidores nascem desativados. Para ativar um, confirme o comando, troque enabled para true e reinicie a Gideon. Escritas e remoções MCP sempre exigem confirmação.",
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "enabled": false,
+      "descricao": "Servidor MCP oficial para leitura de páginas web.",
+      "como_ativar": "Instale o uv/uvx, revise o risco de acesso a URLs internas e altere enabled para true."
+    },
+    "sistema_arquivos": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/henry/Documentos"
+      ],
+      "enabled": false,
+      "descricao": "Servidor MCP oficial restrito à pasta /home/henry/Documentos.",
+      "como_ativar": "Confirme a pasta permitida, tenha Node.js 24+ com npx e altere enabled para true."
+    },
+    "notas": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "/home/henry/Documentos/notas-gideon-mcp.jsonl"
+      },
+      "enabled": false,
+      "descricao": "Servidor MCP oficial de memória local usado para notas estruturadas.",
+      "como_ativar": "Tenha Node.js 24+ com npx, confirme o arquivo de notas e altere enabled para true."
+    }
+  }
+}
