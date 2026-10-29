@@ -40,4 +40,5 @@ export interface VoiceStatusData {
   sensibilidade: number
   falando: boolean
   ouvindo: boolean
+  barge_in_ativo: boolean
 }

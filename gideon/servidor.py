@@ -112,7 +112,7 @@ async def broadcast_ws(evento: dict) -> None:
     elif tipo == "fala_inicio":
         estado = "speaking"
     elif tipo == "fala_fim":
-        estado = "idle"
+        estado = "listening" if evento.get("interrompida_por_voz") else "idle"
     if estado and evento.get("origem") != "voz" and _estado_interface["estado"] in {"listening", "speaking"}:
         estado = None
     if estado:

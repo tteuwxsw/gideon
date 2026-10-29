@@ -11,6 +11,7 @@ from typing import Callable, Any, Generator
 import numpy as np
 
 from gideon.cerebro import Cerebro
+from gideon.configuracao import definir_interrupcao_voz_ativa, obter_interrupcao_voz_ativa
 from gideon.executor import EstadoExecucao, ExecutorConfiavel, ResultadoExecucao
 from gideon.gate import ativar_parada_emergencia, retomar_execucao
 from gideon.memoria import Memoria
@@ -63,7 +64,11 @@ class OrquestradorVoz:
         self.memoria = memoria or Memoria()
         self.callback_ws = callback_ws
         self.ouvinte = OuvinteVoz(callback_evento=self._evento_interno)
-        self.sintetizador = SintetizadorVoz(callback_evento=self._evento_interno)
+        self.sintetizador = SintetizadorVoz(
+            callback_evento=self._evento_interno,
+            callback_barge_in=self._detectar_interrupcao_por_voz,
+            barge_in_ativo=obter_interrupcao_voz_ativa(),
+        )
         self.estado_comportamental_atual: str = "idle"
 
         self.ativo = False
@@ -72,6 +77,7 @@ class OrquestradorVoz:
 
         self._thread_loop: threading.Thread | None = None
         self._parar_evento = threading.Event()
+        self._cancelar_geracao = threading.Event()
         self._lifecycle_lock = threading.Lock()
         self._em_conversa_ativa = False
         self._ultimo_contato = 0.0
@@ -166,13 +172,29 @@ class OrquestradorVoz:
             self.ouvinte.configurar(limiar_energia=sensibilidade, palavras_ativacao=palavras_ativacao)
 
         if barge_in_ativo is not None:
-            self.sintetizador.barge_in_ativo = bool(barge_in_ativo)
+            ativo = definir_interrupcao_voz_ativa(bool(barge_in_ativo))
+            self.sintetizador.barge_in_ativo = ativo
 
         return self.obter_configuracao()
 
     def interromper_fala(self) -> bool:
         """Interrompe imediatamente a fala atual da Gideon."""
+        self._cancelar_geracao.set()
         return self.sintetizador.interromper()
+
+    def _detectar_interrupcao_por_voz(self, audio: np.ndarray) -> bool:
+        """Confirma exclusivamente a palavra de ativação antes de parar a fala."""
+        if not self.sintetizador.barge_in_ativo or not self.sintetizador.falando:
+            return False
+        texto = self.ouvinte.transcrever_audio(audio)
+        tem_wake, _ = self.ouvinte.extrair_wake_word(texto)
+        if not tem_wake:
+            return False
+        self._cancelar_geracao.set()
+        self._em_conversa_ativa = True
+        self._ultimo_contato = time.time()
+        self._evento_interno({"tipo": "interrupcao_voz", "texto": texto})
+        return True
 
     def atualizar_idioma(self, novo_idioma: str) -> None:
         """Atualiza o idioma na síntese vocal e componentes dependentes."""
@@ -212,6 +234,7 @@ class OrquestradorVoz:
         with self._lifecycle_lock:
             self.ativo = False
             self._parar_evento.set()
+            self._cancelar_geracao.set()
             self.sintetizador.interromper()
             if self._thread_loop:
                 self._thread_loop.join(timeout=1.0)
@@ -485,36 +508,44 @@ class OrquestradorVoz:
         def _gerador_sentencas() -> Generator[str, None, None]:
             nonlocal primeiro_chunk
             buffer_atual = ""
-            for ev in self.cerebro.pensar_stream(mensagens_ia, lembrancas=lembrancas):
-                if self.sintetizador.foi_interrompida:
-                    break
-                if ev["tipo"] == "chunk":
-                    pedaco = ev["texto"]
-                    if primeiro_chunk:
-                        self.ultimo_llm_ttft_ms = (time.perf_counter() - t_llm) * 1000.0
-                        primeiro_chunk = False
+            stream = self.cerebro.pensar_stream(mensagens_ia, lembrancas=lembrancas)
+            try:
+                for ev in stream:
+                    if self._cancelar_geracao.is_set() or self.sintetizador.foi_interrompida:
+                        break
+                    if ev["tipo"] == "chunk":
+                        pedaco = ev["texto"]
+                        if primeiro_chunk:
+                            self.ultimo_llm_ttft_ms = (time.perf_counter() - t_llm) * 1000.0
+                            primeiro_chunk = False
 
-                    texto_completo_acumulado.append(pedaco)
-                    buffer_atual += pedaco
-                    buffer_atual = _limpar_tags_legadas(buffer_atual)
+                        texto_completo_acumulado.append(pedaco)
+                        buffer_atual += pedaco
+                        buffer_atual = _limpar_tags_legadas(buffer_atual)
 
-                    while True:
-                        m = re.search(r"^(.+?[.!?…])\s+(.*)$", buffer_atual, re.DOTALL)
-                        if m:
-                            sentenca_pronta = m.group(1).strip()
-                            buffer_atual = m.group(2)
-                        else:
-                            break
-                        if sentenca_pronta:
-                            yield sentenca_pronta
+                        while True:
+                            if self._cancelar_geracao.is_set() or self.sintetizador.foi_interrompida:
+                                break
+                            m = re.search(r"^(.+?[.!?…])\s+(.*)$", buffer_atual, re.DOTALL)
+                            if m:
+                                sentenca_pronta = m.group(1).strip()
+                                buffer_atual = m.group(2)
+                            else:
+                                break
+                            if sentenca_pronta:
+                                yield sentenca_pronta
 
-                elif ev["tipo"] == "erro":
-                    self._definir_estado_ia("error")
-                    yield ev.get("mensagem", "Ocorreu um problema na consulta.")
-                    return
+                    elif ev["tipo"] == "erro":
+                        self._definir_estado_ia("error")
+                        yield ev.get("mensagem", "Ocorreu um problema na consulta.")
+                        return
+            finally:
+                fechar = getattr(stream, "close", None)
+                if callable(fechar):
+                    fechar()
 
             restante = _limpar_tags_legadas(buffer_atual)
-            if restante and not self.sintetizador.foi_interrompida:
+            if restante and not self._cancelar_geracao.is_set() and not self.sintetizador.foi_interrompida:
                 if primeiro_chunk:
                     self.ultimo_llm_ttft_ms = (time.perf_counter() - t_llm) * 1000.0
                     primeiro_chunk = False
@@ -524,7 +555,7 @@ class OrquestradorVoz:
         self.sintetizador.falar_stream(_gerador_sentencas())
 
         resposta_final = _limpar_tags_legadas("".join(texto_completo_acumulado))
-        if resposta_final:
+        if resposta_final and not self._cancelar_geracao.is_set():
             self.memoria.gravar_mensagem("voce", comando_limpo)
             self.memoria.gravar_mensagem("assistente", resposta_final)
             self._registrar_turno_sessao(comando_limpo, resposta_final)
@@ -599,6 +630,7 @@ class OrquestradorVoz:
                 self._evento_interno({"tipo": "transcricao_voz", "texto": comando or texto})
 
                 self._definir_estado_ia("thinking")
+                self._cancelar_geracao.clear()
 
                 # 1. Tenta resolução rápida local e execução verificada no Windows
                 resposta_local = self.processar_fala_local_rapida(

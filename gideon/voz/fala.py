@@ -114,11 +114,13 @@ class SintetizadorVoz:
     def __init__(
         self,
         callback_evento: Callable[[dict], Any] | None = None,
+        callback_barge_in: Callable[[np.ndarray], bool] | None = None,
         barge_in_ativo: bool = True,
         limiar_barge_in: float = 0.06,
         pre_aquecer: bool = True,
     ):
         self.callback_evento = callback_evento
+        self.callback_barge_in = callback_barge_in
         self.idioma = obter_idioma()
         self._pockettts = criar_motor_local()
         self.voz_id = (
@@ -144,6 +146,7 @@ class SintetizadorVoz:
 
         self.rms_saida_atual: float = 0.0
         self.foi_interrompida: bool = False
+        self._barge_in_confirmado: bool = False
         self.audio_barge_in: np.ndarray | None = None
         self.ultima_latencia_ttfa_ms: float = 0.0
         self.ultimo_foi_cache: bool = False
@@ -302,6 +305,7 @@ class SintetizadorVoz:
         with self._lock_fala:
             self._evento_interromper.clear()
             self.foi_interrompida = False
+            self._barge_in_confirmado = False
             self.audio_barge_in = None
             self._falando = True
             t_inicio_tts = time.perf_counter()
@@ -315,7 +319,7 @@ class SintetizadorVoz:
                         amostras, taxa, do_cache = self.sintetizar_para_memoria(texto_limpo)
                         self.ultima_latencia_ttfa_ms = (time.perf_counter() - t_inicio_tts) * 1000.0
                         self.ultimo_foi_cache = do_cache
-                        if len(amostras) > 0:
+                        if len(amostras) > 0 and not self._evento_interromper.is_set():
                             self._reproduzir_audio(amostras, taxa)
                         return not self.foi_interrompida
                     else:
@@ -325,20 +329,23 @@ class SintetizadorVoz:
                 self._falar_windows_fallback(texto_limpo)
                 return not self.foi_interrompida
             except Exception as e:
+                if self._evento_interromper.is_set():
+                    return False
                 print(f"  [Voz] Erro na síntese neural ({self.voz_id}): {e}. Acionando recuperação offline.")
                 self._falar_windows_fallback(texto_limpo)
                 return not self.foi_interrompida
             finally:
                 self._falando = False
                 self.rms_saida_atual = 0.0
-                self._notificar({"tipo": "fala_fim"})
-                self._notificar({"tipo": "estado_ia", "estado": "idle"})
+                self._notificar({"tipo": "fala_fim", "interrompida_por_voz": self._barge_in_confirmado})
+                self._notificar({"tipo": "estado_ia", "estado": "listening" if self._barge_in_confirmado else "idle"})
 
     def falar_stream(self, iterador_sentencas: Iterable[str]) -> bool:
         """Recebe sentenças em streaming do LLM e inicia a fala na 1ª sentença sem esperar o fim."""
         with self._lock_fala:
             self._evento_interromper.clear()
             self.foi_interrompida = False
+            self._barge_in_confirmado = False
             self.audio_barge_in = None
             self._falando = True
             t_inicio = time.perf_counter()
@@ -396,13 +403,15 @@ class SintetizadorVoz:
                         if len(amostras) > 0:
                             self._reproduzir_audio(amostras, taxa)
 
-                    produtor.join(timeout=1.0)
+                    # A reprodução já foi parada; aguarda o produtor sair para não
+                    # deixar uma thread de geração órfã após a interrupção.
+                    produtor.join()
                 return not self.foi_interrompida
             finally:
                 self._falando = False
                 self.rms_saida_atual = 0.0
-                self._notificar({"tipo": "fala_fim"})
-                self._notificar({"tipo": "estado_ia", "estado": "idle"})
+                self._notificar({"tipo": "fala_fim", "interrompida_por_voz": self._barge_in_confirmado})
+                self._notificar({"tipo": "estado_ia", "estado": "listening" if self._barge_in_confirmado else "idle"})
 
     def _falar_lista_sentencas_incremental(self, sentencas: list[str], t_inicio_tts: float) -> bool:
         """Sintetiza a Sentença 1 imediatamente e pré-carrega a Sentença N+1 enquanto a N toca."""
@@ -522,12 +531,13 @@ class SintetizadorVoz:
                 time.sleep(passo_segundos)
 
         def _loop_barge_in():
-            """Monitora o microfone durante a fala rejeitando o próprio eco da Gideon."""
-            if not self.barge_in_ativo or duracao_total < 0.75:
+            """Procura uma fala mais forte que o eco e só interrompe após confirmar a wake word."""
+            if not self.barge_in_ativo or self.callback_barge_in is None or duracao_total < 0.75:
                 return
             taxa_mic = 16000
             chunk_mic = int(taxa_mic * 0.06)
             quadros_acima = 0
+            quadros_silencio = 0
             pre_buffer: deque[np.ndarray] = deque(maxlen=8)
             capturados: list[np.ndarray] = []
 
@@ -539,19 +549,41 @@ class SintetizadorVoz:
                         bloco = dados - np.mean(dados)
                         rms_mic = float(np.sqrt(np.mean(bloco ** 2)))
 
-                        limiar_eco = max(self.limiar_barge_in, self.rms_saida_atual * self.fator_rejeicao_eco)
+                        # Durante a reprodução o limiar é deliberadamente mais alto. O áudio
+                        # precisa superar tanto o piso fixo quanto o eco estimado da caixa.
+                        limiar_eco = max(self.limiar_barge_in * 1.6, self.rms_saida_atual * 2.8)
 
                         if rms_mic > limiar_eco:
                             quadros_acima += 1
+                            quadros_silencio = 0
                             capturados.append(bloco)
-                            if quadros_acima >= 4:
-                                self.audio_barge_in = np.concatenate(list(pre_buffer) + capturados, axis=0).flatten()
-                                self.interromper()
-                                break
+                        elif quadros_acima >= 3:
+                            quadros_silencio += 1
+                            capturados.append(bloco)
                         else:
                             quadros_acima = max(0, quadros_acima - 1)
                             capturados.clear()
                             pre_buffer.append(bloco)
+
+                        duracao_capturada = len(capturados) * chunk_mic / taxa_mic
+                        frase_pronta = quadros_silencio >= 5 or duracao_capturada >= 2.2
+                        if frase_pronta and capturados:
+                            audio_candidato = np.concatenate(list(pre_buffer) + capturados, axis=0).flatten()
+                            confirmou = False
+                            try:
+                                confirmou = bool(self.callback_barge_in(audio_candidato))
+                            except Exception:
+                                confirmou = False
+                            if confirmou:
+                                self._barge_in_confirmado = True
+                                self.audio_barge_in = None
+                                self._notificar({"tipo": "barge_in_confirmado"})
+                                self.interromper()
+                                break
+                            quadros_acima = 0
+                            quadros_silencio = 0
+                            capturados.clear()
+                            pre_buffer.clear()
             except Exception:
                 pass
 
@@ -570,8 +602,8 @@ class SintetizadorVoz:
                 time.sleep(0.01)
         finally:
             parar_monitoramento.set()
-            thread_nivel.join(timeout=0.2)
-            thread_barge.join(timeout=0.2)
+            thread_nivel.join()
+            thread_barge.join()
             self.rms_saida_atual = 0.0
             self._notificar({"tipo": "voz_nivel", "nivel": 0.0})
 

@@ -20,6 +20,7 @@ export const App: React.FC = () => {
   const [isListening, setIsListening] = useState(true)
   const [currentLanguage, setCurrentLanguage] = useState('pt-BR')
   const [voiceMode, setVoiceMode] = useState<ModoEscuta>('ativacao_por_nome')
+  const [voiceInterruptionEnabled, setVoiceInterruptionEnabled] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
   const [authReady, setAuthReady] = useState(false)
@@ -72,6 +73,7 @@ export const App: React.FC = () => {
         if (voiceResponse.ok) {
           const voice = await voiceResponse.json()
           if (voice.modo_escuta) setVoiceMode(voice.modo_escuta)
+          if (typeof voice.barge_in_ativo === 'boolean') setVoiceInterruptionEnabled(voice.barge_in_ativo)
           setIsListening(Boolean(voice.ativa ?? voice.ativo ?? voice.escuta_ativa ?? voice.rodando))
         }
         if (geminiResponse.ok) {
@@ -493,6 +495,18 @@ export const App: React.FC = () => {
           })
           if (!response.ok) throw new Error(await apiError(response))
           setVoiceMode(novoModo)
+        }}
+        voiceInterruptionEnabled={voiceInterruptionEnabled}
+        onChangeVoiceInterruption={async (ativa) => {
+          const response = await apiFetch('/api/voz/configurar', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ barge_in_ativo: ativa })
+          })
+          if (!response.ok) throw new Error(await apiError(response))
+          setVoiceInterruptionEnabled(ativa)
         }}
         onEmergencyStop={async () => {
           const response = await apiFetch('/api/emergencia/parar', { method: 'POST' })

@@ -34,6 +34,7 @@ IDIOMAS_SUPORTADOS = {
 
 CONFIG_PADRAO: dict[str, Any] = {
     "idioma": "pt-BR",
+    "interrupcao_voz_ativa": True,
 }
 
 
@@ -77,6 +78,19 @@ def definir_idioma(novo_idioma: str) -> str:
     config["idioma"] = novo_idioma
     salvar_configuracao(config)
     return novo_idioma
+
+
+def obter_interrupcao_voz_ativa() -> bool:
+    """Indica se dizer "Gideon" pode interromper uma fala em andamento."""
+    return carregar_configuracao().get("interrupcao_voz_ativa", True) is True
+
+
+def definir_interrupcao_voz_ativa(ativa: bool) -> bool:
+    """Persiste a preferência de interrupção da fala por palavra de ativação."""
+    config = carregar_configuracao()
+    config["interrupcao_voz_ativa"] = bool(ativa)
+    salvar_configuracao(config)
+    return bool(ativa)
 
 
 def obter_voz_para_idioma(idioma: str | None = None) -> str:

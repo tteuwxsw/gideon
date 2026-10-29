@@ -12,6 +12,8 @@ interface SettingsSheetProps {
   onChangeLanguage: (idioma: string) => Promise<void>
   currentVoiceMode: ModoEscuta
   onChangeVoiceMode: (modo: ModoEscuta) => Promise<void>
+  voiceInterruptionEnabled: boolean
+  onChangeVoiceInterruption: (ativa: boolean) => Promise<void>
   onEmergencyStop: () => Promise<void>
   onEmergencyResume: () => Promise<void>
   onClearChat: () => Promise<void>
@@ -24,6 +26,8 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
   onChangeLanguage,
   currentVoiceMode,
   onChangeVoiceMode,
+  voiceInterruptionEnabled,
+  onChangeVoiceInterruption,
   onEmergencyStop,
   onEmergencyResume,
   onClearChat
@@ -250,6 +254,33 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({
                     >
                       <div className="font-medium text-xs">{m.label}</div>
                       <div className="text-[10px] text-slate-400">{m.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="setting-label">
+                  <Radio className="w-4 h-4" />
+                  <span>Interromper ao dizer “Gideon”</span>
+                </label>
+                <p className="setting-help">
+                  Durante a fala, somente a palavra de ativação interrompe a resposta.
+                </p>
+                <div className="setting-grid" role="group" aria-label="Interrupção da fala por voz">
+                  {[true, false].map((ativa) => (
+                    <button
+                      key={String(ativa)}
+                      type="button"
+                      aria-pressed={voiceInterruptionEnabled === ativa}
+                      onClick={() => runAction(
+                        () => onChangeVoiceInterruption(ativa),
+                        `Interrupção por voz ${ativa ? 'ativada' : 'desativada'}.`
+                      )}
+                      className={`setting-option ${voiceInterruptionEnabled === ativa ? 'selected' : ''}`}
+                    >
+                      <div className="font-medium text-xs">{ativa ? 'Ativada' : 'Desativada'}</div>
+                      <div className="text-[10px] text-slate-400">{ativa ? 'Diga “Gideon”' : 'Não interromper'}</div>
                     </button>
                   ))}
                 </div>
